@@ -126,8 +126,6 @@ int main() {
 		sleep_ms(10);
 	}
 
-	badger_wait_for_press();
-
 	/*
 	badger_pen(15);
 	badger_clear();
@@ -145,15 +143,19 @@ int main() {
 	*/
 
 	if (!gpio_get(BADGER_PIN_VBUS_DETECT)) {
-		badger_halt();
-	} else {
-		//do_fat();
-		uint8_t val = 0xff;
-		while (1) {
-			printf("Hello?\n");
-			sleep_ms(500);
-			val = ~val;
-			badger_led(val);
-		}
+		badger_text("sleeping", 10, 90, 0.4f, 0.0f, 1);
+		badger_update(true);
+	}
+
+	// Always disable 3v3, but won't actually stop running unless VBUS goes away
+	gpio_put(BADGER_PIN_ENABLE_3V3, 0);
+
+	// Will only get here if on USB power
+	uint8_t val = 0xff;
+	while (1) {
+		printf("Hello?\n");
+		sleep_ms(500);
+		val = ~val;
+		badger_led(val);
 	}
 }
