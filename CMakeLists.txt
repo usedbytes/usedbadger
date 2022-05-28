@@ -25,6 +25,7 @@ add_executable(${NAME}
     ${CMAKE_CURRENT_LIST_DIR}/usb_stdio.c
     ${CMAKE_CURRENT_LIST_DIR}/reset_interface.c
 
+    ${CMAKE_CURRENT_LIST_DIR}/error_disk.c
     ${CMAKE_CURRENT_LIST_DIR}/fat_ramdisk.c
     ${CMAKE_CURRENT_LIST_DIR}/fatfs/ff.c
     ${CMAKE_CURRENT_LIST_DIR}/fatfs/ffunicode.c

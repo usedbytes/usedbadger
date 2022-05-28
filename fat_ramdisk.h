@@ -5,13 +5,18 @@
  extern "C" {
 #endif
 
+#include "fatfs/ff.h"
+
 struct fat_ramdisk {
-	uint16_t block_size;
-	uint16_t num_blocks;
+	const char *label;
+	uint16_t sector_size;
+	uint16_t num_sectors;
 	uint8_t *data;
 };
 
-void fat_ramdisk_init(struct fat_ramdisk *disk_data, unsigned int n_disks);
+// Initialise and mount a FAT filesystem in disk
+// Returns 0 on success
+FRESULT fat_ramdisk_init(const struct fat_ramdisk *disk);
 
 #ifdef __cplusplus
  }

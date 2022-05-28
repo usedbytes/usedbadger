@@ -8,25 +8,53 @@
 #include "fatfs/diskio.h"
 #include "fat_ramdisk.h"
 
-static struct fat_ramdisk *disks;
-static unsigned int num_disks;
+static const struct fat_ramdisk *__disk;
 
-void fat_ramdisk_init(struct fat_ramdisk *disk_data, unsigned int n_disks)
+FRESULT fat_ramdisk_init(const struct fat_ramdisk *disk)
 {
-	disks = disk_data;
-	num_disks = n_disks;
+	static FATFS fs = { 0 };
+	MKFS_PARM opt = {
+		.fmt = FM_FAT | FM_SFD,
+		.n_fat = 0,
+		.align = 0,
+		.n_root = 0,
+		.au_size = 0,
+	};
+
+	__disk = disk;
+	memset(__disk->data, 0, __disk->num_sectors * __disk->sector_size);
+
+	FRESULT res = f_mkfs("", &opt, NULL, 512);
+	if (res) {
+		return res;
+	}
+
+	res = f_mount(&fs, "", 1);
+	if (res) {
+		return res;
+	}
+
+	res = f_setlabel(__disk->label);
+	if (res) {
+		f_unmount("");
+		return res;
+	}
+
+	return 0;
 }
 
 DSTATUS disk_initialize (BYTE pdrv)
 {
-	if (pdrv >= num_disks) {
+	if (pdrv != 0) {
 		return STA_NOINIT;
 	}
+
+	return 0;
 }
 
 DSTATUS disk_status (BYTE pdrv)
 {
-	if (pdrv >= num_disks) {
+	if (pdrv != 0) {
 		return STA_NODISK;
 	}
 
@@ -35,53 +63,57 @@ DSTATUS disk_status (BYTE pdrv)
 
 DRESULT disk_read (BYTE pdrv, BYTE* buff, LBA_t sector, UINT count)
 {
-	if (pdrv >= num_disks) {
+	if (pdrv != 0) {
 		return RES_PARERR;
 	}
 
-	struct fat_ramdisk *disk = &disks[pdrv];
+	if (!__disk) {
+		return RES_NOTRDY;
+	}
 
-	if (sector >= disk->num_blocks) {
+	if (sector >= __disk->num_sectors) {
 		return RES_PARERR;
 	}
 
-	memcpy(buff, &disk->data[sector * disk->block_size], count * disk->block_size);
+	memcpy(buff, &__disk->data[sector * __disk->sector_size], count * __disk->sector_size);
 
 	return RES_OK;
 }
 
 DRESULT disk_write (BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count)
 {
-	if (pdrv >= num_disks) {
+	if (pdrv != 0) {
 		return RES_PARERR;
 	}
 
-	struct fat_ramdisk *disk = &disks[pdrv];
+	if (!__disk) {
+		return RES_NOTRDY;
+	}
 
-	if (sector >= disk->num_blocks) {
+	if (sector >= __disk->num_sectors) {
 		return RES_PARERR;
 	}
 
-	memcpy(&disk->data[sector * disk->block_size], buff, count * disk->block_size);
+	memcpy(&__disk->data[sector * __disk->sector_size], buff, count * __disk->sector_size);
 
 	return RES_OK;
 }
 
-static DRESULT get_sector_count(struct fat_ramdisk *disk, LBA_t *out)
+static DRESULT get_sector_count(const struct fat_ramdisk *__disk, LBA_t *out)
 {
-	*out = disk->num_blocks;
+	*out = __disk->num_sectors;
 
 	return RES_OK;
 }
 
-static DRESULT get_sector_size(struct fat_ramdisk *disk, WORD *out)
+static DRESULT get_sector_size(const struct fat_ramdisk *__disk, WORD *out)
 {
-	*out = disk->block_size;
+	*out = __disk->sector_size;
 
 	return RES_OK;
 }
 
-static DRESULT get_block_size(struct fat_ramdisk *disk, DWORD *out)
+static DRESULT get_block_size(const struct fat_ramdisk *__disk, DWORD *out)
 {
 	*out = 1;
 
@@ -90,22 +122,24 @@ static DRESULT get_block_size(struct fat_ramdisk *disk, DWORD *out)
 
 DRESULT disk_ioctl (BYTE pdrv, BYTE cmd, void* buff)
 {
-	if (pdrv >= num_disks) {
+	if (pdrv != 0) {
 		return RES_PARERR;
 	}
 
-	struct fat_ramdisk *disk = &disks[pdrv];
+	if (!__disk) {
+		return RES_NOTRDY;
+	}
 
 	switch (cmd) {
 	case CTRL_SYNC:
 		// Nothing to do
 		return RES_OK;
 	case GET_SECTOR_COUNT:
-		return get_sector_count(disk, (LBA_t *)buff);
+		return get_sector_count(__disk, (LBA_t *)buff);
 	case GET_SECTOR_SIZE:
-		return get_sector_size(disk, (WORD *)buff);
+		return get_sector_size(__disk, (WORD *)buff);
 	case GET_BLOCK_SIZE:
-		return get_block_size(disk, (DWORD *)buff);
+		return get_block_size(__disk, (DWORD *)buff);
 	default:
 		return RES_ERROR;
 	}
