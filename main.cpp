@@ -19,27 +19,28 @@ using namespace pimoroni;
 
 enum
 {
-  DISK_BLOCK_NUM  = 16, // 8KB is the smallest size that windows allow to mount
-  DISK_BLOCK_SIZE = 512
+  ERROR_DISK_BLOCK_NUM  = 16, // 8KB is the smallest size that windows allow to mount
+  ERROR_DISK_BLOCK_SIZE = 512,
+  ERROR_CONTENTS_BLOCK = 3,
+  ERROR_SIZE_BLOCK = 2,
+  ERROR_SIZE_OFFSET = 32 + 28,
 };
 
-#define README_CONTENTS "This is the contents of the readme file"
-
-uint8_t msc_disk[DISK_BLOCK_NUM][DISK_BLOCK_SIZE] =
+const uint8_t error_disk[ERROR_DISK_BLOCK_NUM][ERROR_DISK_BLOCK_SIZE] =
 {
   //------------- Block0: Boot Sector -------------//
-  // byte_per_sector    = DISK_BLOCK_SIZE; fat12_sector_num_16  = DISK_BLOCK_NUM;
+  // byte_per_sector    = ERROR_DISK_BLOCK_SIZE; fat12_sector_num_16  = ERROR_DISK_BLOCK_NUM;
   // sector_per_cluster = 1; reserved_sectors = 1;
   // fat_num            = 1; fat12_root_entry_num = 16;
   // sector_per_fat     = 1; sector_per_track = 1; head_num = 1; hidden_sectors = 0;
   // drive_number       = 0x80; media_type = 0xf8; extended_boot_signature = 0x29;
-  // filesystem_type    = "FAT12   "; volume_serial_number = 0x1234; volume_label = "TinyUSB MSC";
+  // filesystem_type    = "FAT12   "; volume_serial_number = 0x1234; volume_label = "ERROR";
   // FAT magic code at offset 510-511
   {
       0xEB, 0x3C, 0x90, 0x4D, 0x53, 0x44, 0x4F, 0x53, 0x35, 0x2E, 0x30, 0x00, 0x02, 0x01, 0x01, 0x00,
       0x01, 0x10, 0x00, 0x10, 0x00, 0xF8, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
-      0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x29, 0x34, 0x12, 0x00, 0x00, 'T' , 'i' , 'n' , 'y' , 'U' ,
-      'S' , 'B' , ' ' , 'M' , 'S' , 'C' , 0x46, 0x41, 0x54, 0x31, 0x32, 0x20, 0x20, 0x20, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x29, 0x34, 0x12, 0x00, 0x00, 'E' , 'R' , 'R' , 'O' , 'R' ,
+      ' ' , ' ' , ' ' , ' ' , ' ' , ' ' , 0x46, 0x41, 0x54, 0x31, 0x32, 0x20, 0x20, 0x20, 0x00, 0x00,
 
       // Zero up to 2 last bytes of FAT magic code
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -83,20 +84,19 @@ uint8_t msc_disk[DISK_BLOCK_NUM][DISK_BLOCK_SIZE] =
   //------------- Block2: Root Directory -------------//
   {
       // first entry is volume label
-      'T' , 'i' , 'n' , 'y' , 'U' , 'S' , 'B' , ' ' , 'M' , 'S' , 'C' , 0x08, 0x00, 0x00, 0x00, 0x00,
+      'E' , 'R' , 'R' , 'O' , 'R' , ' ' , ' ' , ' ' , ' ' , ' ' , ' ' , 0x08, 0x00, 0x00, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4F, 0x6D, 0x65, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-      // second entry is readme file
-      'R' , 'E' , 'A' , 'D' , 'M' , 'E' , ' ' , ' ' , 'T' , 'X' , 'T' , 0x20, 0x00, 0xC6, 0x52, 0x6D,
-      0x65, 0x43, 0x65, 0x43, 0x00, 0x00, 0x88, 0x6D, 0x65, 0x43, 0x02, 0x00,
-      sizeof(README_CONTENTS)-1, 0x00, 0x00, 0x00 // readme's files size (4 Bytes)
+      // second entry is error file
+      'E' , 'R' , 'R' , 'O' , 'R' , ' ' , ' ' , ' ' , 'T' , 'X' , 'T' , 0x20, 0x00, 0xC6, 0x52, 0x6D,
+      0x65, 0x43, 0x65, 0x43, 0x00, 0x00, 0x88, 0x6D, 0x65, 0x43, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
   },
 
-  //------------- Block3: Readme Content -------------//
-  README_CONTENTS
+  //------------- Block3: File Content -------------//
 };
 
 static void init_fat(struct msc_ctx *ctx)
 {
+	char error_buf[32];
 	const unsigned int block_size = 512;
 	const unsigned int num_blocks = 128;
 	// Minimum size for FatFS
@@ -123,35 +123,38 @@ static void init_fat(struct msc_ctx *ctx)
 	const char *contents = "This is the readme written via fatfs";
 
 	FRESULT res = f_mkfs("", &opt, NULL, 512);
-	printf("f_mkfs: %d\n", res);
 	if (res) {
-		goto err_free;
+		snprintf(error_buf, sizeof(error_buf), "f_mkfs: %d", res);
+		goto err_out;
 	}
 
 	res = f_mount(&fs, "", 1);
-	printf("f_mount: %d\n", res);
 	if (res) {
-		goto err_free;
+		snprintf(error_buf, sizeof(error_buf), "f_mount: %d", res);
+		goto err_out;
 	}
 
 	res = f_setlabel("usedbadger");
-	printf("f_setlabel: %d\n", res);
+	if (res) {
+		snprintf(error_buf, sizeof(error_buf), "f_setlabel: %d", res);
+		goto err_unmount;
+	}
 
 	res = f_open(&fp, "readme.txt", FA_WRITE | FA_CREATE_ALWAYS);
-	printf("f_open: %d\n", res);
 	if (res) {
+		snprintf(error_buf, sizeof(error_buf), "f_open: %d", res);
 		goto err_unmount;
 	}
 
 	res = f_write(&fp, contents, strlen(contents), &bw);
-	printf("f_write: %d\n", res);
 	if (res) {
+		snprintf(error_buf, sizeof(error_buf), "f_write: %d", res);
 		goto err_close;
 	}
 
 	res = f_close(&fp);
-	printf("f_close: %d\n", res);
 	if (res) {
+		snprintf(error_buf, sizeof(error_buf), "f_close: %d", res);
 		goto err_unmount;
 	}
 
@@ -160,6 +163,7 @@ static void init_fat(struct msc_ctx *ctx)
 	ctx->block_size = block_size;
 	ctx->num_blocks = num_blocks;
 	ctx->data = disk_data;
+	ctx->read_only = false;
 
 	return;
 
@@ -167,13 +171,23 @@ err_close:
 	f_close(&fp);
 err_unmount:
 	f_unmount("");
-err_free:
-	free(disk_data);
+err_out:
 
 	// Set-up the default hard-coded FS if something went wrong
-	ctx->block_size = DISK_BLOCK_SIZE;
-	ctx->num_blocks = DISK_BLOCK_NUM;
-	ctx->data = &msc_disk[0][0];
+	memcpy(disk_data, &error_disk[0][0], sizeof(error_disk));
+
+	char *dst_contents = reinterpret_cast<char *>(&disk_data[ERROR_CONTENTS_BLOCK * ERROR_DISK_BLOCK_SIZE]);
+	snprintf(dst_contents, ERROR_DISK_BLOCK_SIZE,
+			"Encountered error setting up filesystem: %s\n", error_buf);
+
+	uint32_t file_size = strnlen(dst_contents, ERROR_DISK_BLOCK_SIZE);
+	char *dst_size = reinterpret_cast<char *>(&disk_data[ERROR_SIZE_BLOCK * ERROR_DISK_BLOCK_SIZE + ERROR_SIZE_OFFSET]);
+	memcpy(dst_size, &file_size, sizeof(file_size));
+
+	ctx->block_size = ERROR_DISK_BLOCK_SIZE;
+	ctx->num_blocks = ERROR_DISK_BLOCK_NUM;
+	ctx->read_only = true;
+	ctx->data = disk_data;
 
 	return;
 }

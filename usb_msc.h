@@ -13,6 +13,7 @@ struct msc_ctx {
 	uint16_t block_size;
 	uint16_t num_blocks;
 	uint8_t *data;
+	bool read_only;
 };
 
 // Must be called before USB init!

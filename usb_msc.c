@@ -124,11 +124,11 @@ bool tud_msc_is_writable_cb (uint8_t lun)
 {
   (void) lun;
 
-#ifdef CFG_EXAMPLE_MSC_READONLY
-  return false;
-#else
-  return true;
-#endif
+  if (!msc_ctx) {
+	return false;
+  }
+
+  return !msc_ctx->read_only;
 }
 
 // Callback invoked when received WRITE10 command.
