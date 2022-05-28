@@ -23,6 +23,7 @@ add_executable(${NAME}
     ${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.c
 
     ${CMAKE_CURRENT_LIST_DIR}/usb_stdio.c
+    ${CMAKE_CURRENT_LIST_DIR}/reset_interface.c
 )
 
 # Make sure TinyUSB can find tusb_config.h
@@ -44,6 +45,7 @@ target_link_libraries(${NAME}
     hershey_fonts
     pico_multicore
     pico_unique_id
+    pico_usb_reset_interface_headers
     pico_stdlib
     tinyusb_board
     tinyusb_device
