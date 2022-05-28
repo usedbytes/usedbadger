@@ -41,6 +41,7 @@ target_link_libraries(${NAME}
     hardware_spi
     hershey_fonts
     pico_multicore
+    pico_unique_id
     pico_stdlib
     tinyusb_board
     tinyusb_device
