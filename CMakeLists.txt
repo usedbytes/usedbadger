@@ -53,6 +53,7 @@ target_link_libraries(${NAME}
     pico_multicore
     pico_unique_id
     pico_usb_reset_interface_headers
+    pico_util
     pico_stdlib
     tinyusb_board
     tinyusb_device

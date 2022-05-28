@@ -5,7 +5,12 @@
  extern "C" {
 #endif
 
-int usb_main(void);
+struct usb_opt {
+	void (*connect_cb)(void);
+	void (*disconnect_cb)(void);
+};
+
+int usb_main(const struct usb_opt *opt);
 
 #ifdef __cplusplus
  }
