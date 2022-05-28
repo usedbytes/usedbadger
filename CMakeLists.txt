@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 
 # Change your executable name to something creative!
-set(NAME pico-boilerplate) # <-- Name your project/executable here!
+set(NAME usedbadger) # <-- Name your project/executable here!
 
 include(pimoroni_pico_import.cmake)
 include(pico_sdk_import.cmake)
@@ -21,14 +21,18 @@ add_executable(${NAME}
 
 # Include required libraries
 # This assumes `pimoroni-pico` is stored alongside your project
-include(common/pimoroni_i2c)
-include(libraries/pico_explorer/pico_explorer)
-# include(libraries/pico_display/pico_display)
+include(drivers/uc8151/uc8151)
+include(libraries/hershey_fonts/hershey_fonts)
+include(libraries/badger2040/badger2040)
+include(libraries/bitmap_fonts/bitmap_fonts)
 
 # Don't forget to link the libraries you need!
 target_link_libraries(${NAME}
-    pimoroni_i2c
-    pico_explorer # <-- List libraries here!
+    bitmap_fonts
+    uc8151
+    hardware_spi
+    hershey_fonts
+    badger2040
 )
 
 # create map/bin/hex file etc.
