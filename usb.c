@@ -55,7 +55,7 @@ void hid_task(void);
 /*------------- MAIN -------------*/
 int usb_main(void)
 {
-  board_init();
+  //board_init();
   tusb_init();
 
   while (1)
@@ -205,7 +205,7 @@ void hid_task(void)
   if ( board_millis() - start_ms < interval_ms) return; // not enough time
   start_ms += interval_ms;
 
-  uint32_t const btn = board_button_read();
+  uint32_t const btn = 0; //board_button_read();
 
   // Remote wakeup
   if ( tud_suspended() && btn )
@@ -232,7 +232,8 @@ void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint8_t
 
   if (next_report_id < REPORT_ID_COUNT)
   {
-    send_hid_report(next_report_id, board_button_read());
+    //send_hid_report(next_report_id, board_button_read());
+    send_hid_report(next_report_id, 0);
   }
 }
 

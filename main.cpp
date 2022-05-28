@@ -55,6 +55,10 @@ int main() {
 	badger.text("(press any button to go to sleep.)", 10, 70, 0.4f);
 	badger.update();
 
+	while (badger.is_busy()) {
+		sleep_ms(10);
+	}
+
 	badger.wait_for_press();
 
 	badger.pen(15);
@@ -71,7 +75,9 @@ int main() {
 		sleep_ms(10);
 	}
 
-	badger.halt();
+	if (!gpio_get(badger.VBUS_DETECT)) {
+		badger.halt();
+	}
 
 	// proof we halted, the LED will not turn on
 	badger.led(255);
