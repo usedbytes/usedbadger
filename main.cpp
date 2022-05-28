@@ -10,6 +10,8 @@
 #include "common/pimoroni_common.hpp"
 #include "badger2040.hpp"
 
+#include "fatfs/ff.h"
+#include "fat_ramdisk.h"
 #include "usb.h"
 #include "usb_msc.h"
 
@@ -93,21 +95,104 @@ uint8_t msc_disk[DISK_BLOCK_NUM][DISK_BLOCK_SIZE] =
   README_CONTENTS
 };
 
+static void init_fat(struct msc_ctx *ctx)
+{
+	const unsigned int block_size = 512;
+	const unsigned int num_blocks = 128;
+	// Minimum size for FatFS
+	uint8_t *disk_data = static_cast<uint8_t *>(calloc(1, num_blocks * block_size));
+	static struct fat_ramdisk fat_disk = {
+		.block_size = block_size,
+		.num_blocks = num_blocks,
+		.data = disk_data,
+	};
+
+	fat_ramdisk_init(&fat_disk, 1);
+
+	MKFS_PARM opt = {
+		.fmt = FM_FAT | FM_SFD,
+		.n_fat = 0,
+		.align = 0,
+		.n_root = 0,
+		.au_size = 0,
+	};
+
+	FATFS fs = { 0 };
+	FIL fp = { 0 };
+	UINT bw;
+	const char *contents = "This is the readme written via fatfs";
+
+	FRESULT res = f_mkfs("", &opt, NULL, 512);
+	printf("f_mkfs: %d\n", res);
+	if (res) {
+		goto err_free;
+	}
+
+	res = f_mount(&fs, "", 1);
+	printf("f_mount: %d\n", res);
+	if (res) {
+		goto err_free;
+	}
+
+	res = f_setlabel("usedbadger");
+	printf("f_setlabel: %d\n", res);
+
+	res = f_open(&fp, "readme.txt", FA_WRITE | FA_CREATE_ALWAYS);
+	printf("f_open: %d\n", res);
+	if (res) {
+		goto err_unmount;
+	}
+
+	res = f_write(&fp, contents, strlen(contents), &bw);
+	printf("f_write: %d\n", res);
+	if (res) {
+		goto err_close;
+	}
+
+	res = f_close(&fp);
+	printf("f_close: %d\n", res);
+	if (res) {
+		goto err_unmount;
+	}
+
+	f_unmount("");
+
+	ctx->block_size = block_size;
+	ctx->num_blocks = num_blocks;
+	ctx->data = disk_data;
+
+	return;
+
+err_close:
+	f_close(&fp);
+err_unmount:
+	f_unmount("");
+err_free:
+	free(disk_data);
+
+	// Set-up the default hard-coded FS if something went wrong
+	ctx->block_size = DISK_BLOCK_SIZE;
+	ctx->num_blocks = DISK_BLOCK_NUM;
+	ctx->data = &msc_disk[0][0];
+
+	return;
+}
+
 void core1_main()
 {
 	static struct msc_ctx msc_ctx = {
 		.vid = "TinyUSB",
 		.pid = "Mass Storage",
 		.rev = "1.0",
-
-		.block_size = 512,
-		.num_blocks = 16,
-		.data = &msc_disk[0][0],
 	};
 
+	init_fat(&msc_ctx);
 	usb_msc_init(&msc_ctx);
 
 	usb_main();
+
+	// Will never reach here
+	return;
 }
 
 // this simple example tells you which button was used to wake up
@@ -152,6 +237,7 @@ int main() {
 
 	badger.wait_for_press();
 
+	/*
 	badger.pen(15);
 	badger.clear();
 	badger.pen(0);
@@ -165,10 +251,12 @@ int main() {
 	while (badger.is_busy()) {
 		sleep_ms(10);
 	}
+	*/
 
 	if (!gpio_get(badger.VBUS_DETECT)) {
 		badger.halt();
 	} else {
+		//do_fat();
 		uint8_t val = 0xff;
 		while (1) {
 			printf("Hello?\n");

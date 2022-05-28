@@ -1,4 +1,3 @@
-
 #ifndef __UB_USB_MSC_H__
 #define __UB_USB_MSC_H__
 
