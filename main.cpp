@@ -5,11 +5,19 @@
 #include <algorithm>
 #include "pico/time.h"
 #include "pico/platform.h"
+#include "pico/multicore.h"
 
 #include "common/pimoroni_common.hpp"
 #include "badger2040.hpp"
 
+#include "usb.h"
+
 using namespace pimoroni;
+
+void core1_main()
+{
+	usb_main();
+}
 
 // this simple example tells you which button was used to wake up
 // Badger2040 and then immediately halts again on another button press
@@ -31,6 +39,11 @@ int main() {
 
 	if(button != "") {
 		message = "woken up by button " + button + ".";
+	}
+
+	if (gpio_get(badger.VBUS_DETECT)) {
+		message = "on VBUS";
+		multicore_launch_core1(core1_main);
 	}
 
 	badger.thickness(2);

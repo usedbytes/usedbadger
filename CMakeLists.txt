@@ -17,7 +17,14 @@ pico_sdk_init()
 # Add your source files
 add_executable(${NAME}
     main.cpp # <-- Add source files here!
+
+    ${CMAKE_CURRENT_LIST_DIR}/usb.c
+    ${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.c
 )
+
+# Make sure TinyUSB can find tusb_config.h
+target_include_directories(usedbadger PUBLIC
+        ${CMAKE_CURRENT_LIST_DIR})
 
 # Include required libraries
 # This assumes `pimoroni-pico` is stored alongside your project
@@ -28,11 +35,15 @@ include(libraries/bitmap_fonts/bitmap_fonts)
 
 # Don't forget to link the libraries you need!
 target_link_libraries(${NAME}
+    badger2040
     bitmap_fonts
-    uc8151
     hardware_spi
     hershey_fonts
-    badger2040
+    pico_multicore
+    pico_stdlib
+    tinyusb_board
+    tinyusb_device
+    uc8151
 )
 
 # create map/bin/hex file etc.
