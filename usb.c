@@ -48,7 +48,9 @@ enum  {
 static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
 
 void led_blinking_task(void);
-void cdc_task(void);
+//void cdc_task(void);
+
+extern bool ub_stdio_usb_init(void);
 
 /*------------- MAIN -------------*/
 int usb_main(void)
@@ -56,12 +58,14 @@ int usb_main(void)
   //board_init();
   tusb_init();
 
+  ub_stdio_usb_init();
+
   while (1)
   {
     tud_task(); // tinyusb device task
     led_blinking_task();
 
-    cdc_task();
+    //cdc_task();
   }
 
   return 0;
@@ -98,7 +102,7 @@ void tud_resume_cb(void)
   blink_interval_ms = BLINK_MOUNTED;
 }
 
-
+#if 0
 //--------------------------------------------------------------------+
 // USB CDC
 //--------------------------------------------------------------------+
@@ -147,6 +151,7 @@ void tud_cdc_rx_cb(uint8_t itf)
 {
   (void) itf;
 }
+#endif
 
 //--------------------------------------------------------------------+
 // BLINKING TASK

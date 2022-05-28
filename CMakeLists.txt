@@ -21,6 +21,8 @@ add_executable(${NAME}
     ${CMAKE_CURRENT_LIST_DIR}/msc_disk.c
     ${CMAKE_CURRENT_LIST_DIR}/usb.c
     ${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.c
+
+    ${CMAKE_CURRENT_LIST_DIR}/usb_stdio.c
 )
 
 # Make sure TinyUSB can find tusb_config.h

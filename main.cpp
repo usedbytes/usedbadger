@@ -77,8 +77,14 @@ int main() {
 
 	if (!gpio_get(badger.VBUS_DETECT)) {
 		badger.halt();
+	} else {
+		uint8_t val = 0xff;
+		while (1) {
+			printf("Hello?\n");
+			sleep_ms(500);
+			val = ~val;
+			badger.led(val);
+		}
 	}
 
-	// proof we halted, the LED will not turn on
-	badger.led(255);
 }
