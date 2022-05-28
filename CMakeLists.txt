@@ -18,9 +18,9 @@ pico_sdk_init()
 add_executable(${NAME}
     main.cpp # <-- Add source files here!
 
-    ${CMAKE_CURRENT_LIST_DIR}/msc_disk.c
     ${CMAKE_CURRENT_LIST_DIR}/usb.c
     ${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.c
+    ${CMAKE_CURRENT_LIST_DIR}/usb_msc.c
 
     ${CMAKE_CURRENT_LIST_DIR}/usb_stdio.c
     ${CMAKE_CURRENT_LIST_DIR}/reset_interface.c
