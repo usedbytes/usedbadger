@@ -16,7 +16,9 @@ pico_sdk_init()
 
 # Add your source files
 add_executable(${NAME}
-    main.cpp # <-- Add source files here!
+    main.c # <-- Add source files here!
+
+    ${CMAKE_CURRENT_LIST_DIR}/badger.cpp
 
     ${CMAKE_CURRENT_LIST_DIR}/usb.c
     ${CMAKE_CURRENT_LIST_DIR}/usb_descriptors.c
