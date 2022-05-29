@@ -23,15 +23,16 @@
  *
  */
 
+#include <stdio.h>
 #include "bsp/board.h"
 #include "tusb.h"
 
-#include "usb_msc.h"
+#include "usb.h"
 
 // whether host does safe-eject
 static bool ejected = false;
 
-static const struct msc_ctx *msc_ctx;
+extern const struct usb_opt *__usb_opt;
 
 // Invoked when received SCSI_CMD_INQUIRY
 // Application fill vendor id, product id and revision with string up to 8, 16, 4 characters respectively
@@ -39,13 +40,15 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8], uint8_t product_id[16
 {
   (void) lun;
 
-  if (!msc_ctx) {
+  if (!__usb_opt) {
 	return;
   }
 
-  memcpy(vendor_id  , msc_ctx->vid, strlen(msc_ctx->vid));
-  memcpy(product_id , msc_ctx->pid, strlen(msc_ctx->pid));
-  memcpy(product_rev, msc_ctx->rev, strlen(msc_ctx->rev));
+  const struct usb_msc_disk *disk = &__usb_opt->msc.disk;
+
+  memcpy(vendor_id, disk->vid, strlen(disk->vid));
+  memcpy(product_id, disk->pid, strlen(disk->pid));
+  memcpy(product_rev, disk->rev, strlen(disk->rev));
 }
 
 // Invoked when received Test Unit Ready command.
@@ -70,12 +73,14 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t* block_count, uint16_t* block_siz
 {
   (void) lun;
 
-  if (!msc_ctx) {
+  if (!__usb_opt) {
 	return;
   }
 
-  *block_count = msc_ctx->num_blocks;
-  *block_size  = msc_ctx->block_size;
+  const struct usb_msc_disk *disk = &__usb_opt->msc.disk;
+
+  *block_count = disk->num_blocks;
+  *block_size  = disk->block_size;
 }
 
 // Invoked when received Start Stop Unit command
@@ -85,6 +90,10 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool start, boo
 {
   (void) lun;
   (void) power_condition;
+
+  if (__usb_opt && __usb_opt->msc.start_stop_cb) {
+    __usb_opt->msc.start_stop_cb(__usb_opt->user, lun, power_condition, start, load_eject);
+  }
 
   if ( load_eject )
   {
@@ -107,14 +116,16 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset, void* buff
 {
   (void) lun;
 
-  if (!msc_ctx) {
+  if (!__usb_opt) {
 	return -1;
   }
 
-  // out of ramdisk
-  if ( lba >= msc_ctx->num_blocks ) return -1;
+  const struct usb_msc_disk *disk = &__usb_opt->msc.disk;
 
-  uint8_t const* addr = &msc_ctx->data[(lba * msc_ctx->block_size) + offset];
+  // out of ramdisk
+  if ( lba >= disk->num_blocks ) return -1;
+
+  uint8_t const* addr = &disk->data[(lba * disk->block_size) + offset];
   memcpy(buffer, addr, bufsize);
 
   return (int32_t) bufsize;
@@ -124,11 +135,13 @@ bool tud_msc_is_writable_cb (uint8_t lun)
 {
   (void) lun;
 
-  if (!msc_ctx) {
+  if (!__usb_opt) {
 	return false;
   }
 
-  return !msc_ctx->read_only;
+  const struct usb_msc_disk *disk = &__usb_opt->msc.disk;
+
+  return !disk->read_only;
 }
 
 // Callback invoked when received WRITE10 command.
@@ -137,14 +150,16 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t* 
 {
   (void) lun;
 
-  if (!msc_ctx) {
+  if (!__usb_opt) {
 	return -1;
   }
 
-  // out of ramdisk
-  if ( lba >= msc_ctx->num_blocks ) return -1;
+  const struct usb_msc_disk *disk = &__usb_opt->msc.disk;
 
-  uint8_t* addr = &msc_ctx->data[(lba * msc_ctx->block_size) + offset];
+  // out of ramdisk
+  if ( lba >= disk->num_blocks ) return -1;
+
+  uint8_t* addr = &disk->data[(lba * disk->block_size) + offset];
   memcpy(addr, buffer, bufsize);
 
   return (int32_t) bufsize;
@@ -189,9 +204,4 @@ int32_t tud_msc_scsi_cb (uint8_t lun, uint8_t const scsi_cmd[16], void* buffer, 
   }
 
   return (int32_t) resplen;
-}
-
-void usb_msc_init(const struct msc_ctx *ctx)
-{
-	msc_ctx = ctx;
 }

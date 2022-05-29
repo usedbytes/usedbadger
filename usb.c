@@ -35,6 +35,8 @@
 // MACRO CONSTANT TYPEDEF PROTYPES
 //--------------------------------------------------------------------+
 
+const struct usb_opt *__usb_opt;
+
 extern bool ub_stdio_usb_init(void);
 
 static void (*__connect_cb)(void);
@@ -43,13 +45,9 @@ static void (*__disconnect_cb)(void);
 /*------------- MAIN -------------*/
 int usb_main(const struct usb_opt *opt)
 {
-  if (opt) {
-    __connect_cb = opt->connect_cb;
-    __disconnect_cb = opt->disconnect_cb;
-  }
+  __usb_opt = opt;
 
   tusb_init();
-
   ub_stdio_usb_init();
 
   while (1)
@@ -67,16 +65,16 @@ int usb_main(const struct usb_opt *opt)
 // Invoked when device is mounted
 void tud_mount_cb(void)
 {
-  if (__connect_cb) {
-    __connect_cb();
+  if (__usb_opt && __usb_opt->connect_cb) {
+    __usb_opt->connect_cb(__usb_opt->user);
   }
 }
 
 // Invoked when device is unmounted
 void tud_umount_cb(void)
 {
-  if (__disconnect_cb) {
-    __disconnect_cb();
+  if (__usb_opt && __usb_opt->disconnect_cb) {
+    __usb_opt->disconnect_cb(__usb_opt->user);
   }
 }
 
@@ -86,15 +84,15 @@ void tud_umount_cb(void)
 void tud_suspend_cb(bool remote_wakeup_en)
 {
   (void) remote_wakeup_en;
-  if (__disconnect_cb) {
-    __disconnect_cb();
+  if (__usb_opt && __usb_opt->disconnect_cb) {
+    __usb_opt->disconnect_cb(__usb_opt->user);
   }
 }
 
 // Invoked when usb bus is resumed
 void tud_resume_cb(void)
 {
-  if (__connect_cb) {
-    __connect_cb();
+  if (__usb_opt && __usb_opt->connect_cb) {
+    __usb_opt->connect_cb(__usb_opt->user);
   }
 }

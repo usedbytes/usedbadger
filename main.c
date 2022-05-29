@@ -13,7 +13,6 @@
 #include "error_disk.h"
 #include "fat_ramdisk.h"
 #include "usb.h"
-#include "usb_msc.h"
 
 #define FATFS_SECTOR_SIZE 512
 #define FATFS_NUM_SECTORS 128
@@ -27,12 +26,12 @@ static const struct fat_ramdisk fat_ramdisk = {
 	.data = fatfs_ramdisk_data,
 };
 
-static void init_filesystem(struct msc_ctx *ctx)
+static void init_filesystem(struct usb_msc_disk *msc_disk)
 {
-	ctx->block_size = fat_ramdisk.sector_size;
-	ctx->num_blocks = fat_ramdisk.num_sectors;
-	ctx->data = fat_ramdisk.data;
-	ctx->read_only = false;
+	msc_disk->block_size = fat_ramdisk.sector_size;
+	msc_disk->num_blocks = fat_ramdisk.num_sectors;
+	msc_disk->data = fat_ramdisk.data;
+	msc_disk->read_only = false;
 
 	FIL fp = { 0 };
 	UINT bw;
@@ -72,7 +71,7 @@ err_unmount:
 	f_unmount("");
 err_out:
 	init_error_filesystem(&fat_ramdisk, error_buf);
-	ctx->read_only = true;
+	msc_disk->read_only = true;
 	return;
 }
 
@@ -85,6 +84,7 @@ enum msg_type {
 	MSG_TYPE_USB_CONNECTED,
 	MSG_TYPE_USB_DISCONNECTED,
 	MSG_TYPE_MSC_UNMOUNTED,
+	MSG_TYPE_CDC_CONNECTED,
 };
 
 struct msg {
@@ -101,6 +101,20 @@ static void usb_disconnect_cb()
 	queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_USB_DISCONNECTED });
 }
 
+static void usb_msc_start_stop_cb(void *user, uint8_t lun, uint8_t power_condition, bool start, bool load_eject)
+{
+	if (load_eject && !start) {
+		queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_MSC_UNMOUNTED });
+	}
+}
+
+static void usb_cdc_line_state_cb(void *user, uint8_t itf, bool dtr, bool rts)
+{
+	if (dtr && rts) {
+		queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_CDC_CONNECTED });
+	}
+}
+
 static const struct usb_opt usb_opt = {
 	.connect_cb = usb_connect_cb,
 	.disconnect_cb = usb_disconnect_cb,
@@ -108,16 +122,25 @@ static const struct usb_opt usb_opt = {
 
 void core1_main()
 {
-	static struct msc_ctx msc_ctx = {
-		.vid = "usedbytes",
-		.pid = "usedbadger mass storage",
-		.rev = "1.0",
+	static struct usb_opt opt = {
+		.user = NULL,
+		.connect_cb = usb_connect_cb,
+		.disconnect_cb = usb_disconnect_cb,
+		.cdc = {
+			.line_state_cb = usb_cdc_line_state_cb,
+		},
+		.msc = {
+			.disk = {
+				.vid = "usedbytes",
+				.pid = "usedbadger mass storage",
+				.rev = "1.0",
+			},
+			.start_stop_cb = usb_msc_start_stop_cb,
+		},
 	};
 
-	init_filesystem(&msc_ctx);
-	usb_msc_init(&msc_ctx);
-
-	usb_main(&usb_opt);
+	init_filesystem(&opt.msc.disk);
+	usb_main(&opt);
 
 	// Will never reach here
 	return;
@@ -221,6 +244,9 @@ int main() {
 		case MSG_TYPE_MSC_UNMOUNTED:
 			badger_text("MSC unmounted", 10, 24, 0.4f, 0.0f, 1);
 			badger_partial_update(0, 16, 296, 16, true);
+			break;
+		case MSG_TYPE_CDC_CONNECTED:
+			printf("Hello CDC\n");
 			break;
 		case MSG_TYPE_USB_DISCONNECTED:
 			badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);

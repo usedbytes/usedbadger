@@ -15,10 +15,13 @@
 #include "pico/mutex.h"
 #include "hardware/irq.h"
 
+#include "usb.h"
+
 #define UB_STDIO_USB_LOW_PRIORITY_IRQ 31
 #define UB_STDIO_USB_TASK_INTERVAL_US 1000
 #define UB_STDIO_USB_STDOUT_TIMEOUT_US 500000
 
+extern const struct usb_opt *__usb_opt;
 alarm_pool_t *alarm_pool;
 
 static_assert(UB_STDIO_USB_LOW_PRIORITY_IRQ > RTC_IRQ, ""); // note RTC_IRQ is currently the last one
@@ -96,6 +99,16 @@ stdio_driver_t ub_stdio_usb = {
 
 bool ub_stdio_usb_connected(void) {
     return tud_cdc_connected();
+}
+
+// Invoked when cdc when line state changed e.g connected/disconnected
+void tud_cdc_line_state_cb(uint8_t itf, bool dtr, bool rts)
+{
+  (void) itf;
+
+  if (__usb_opt && __usb_opt->cdc.line_state_cb) {
+    __usb_opt->cdc.line_state_cb(__usb_opt->user, itf, dtr, rts);
+  }
 }
 
 bool ub_stdio_usb_init(void) {
