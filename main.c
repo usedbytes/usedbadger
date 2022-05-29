@@ -8,46 +8,17 @@
 #include "pico/platform.h"
 #include "pico/multicore.h"
 
-#include "spiffs/src/spiffs.h"
 #include "badger.h"
 #include "fatfs/ff.h"
 #include "error_disk.h"
 #include "fat_ramdisk.h"
 #include "usb.h"
 
+#include "littlefs/lfs.h"
+#include "littlefs/bd/lfs_rambd.h"
+
 #define FATFS_SECTOR_SIZE 512
 #define FATFS_NUM_SECTORS 128
-
-static uint8_t __attribute__ ((section ("noinit"))) spiffs_ramdisk_data[FATFS_SECTOR_SIZE * 32];
-
-s32_t ram_spiffs_read(u32_t addr, u32_t size, u8_t *dst)
-{
-	memcpy(dst, &spiffs_ramdisk_data[addr], size);
-	return SPIFFS_OK;
-}
-
-s32_t ram_spiffs_write(u32_t addr, u32_t size, u8_t *src)
-{
-	memcpy(&spiffs_ramdisk_data[addr], src, size);
-	return SPIFFS_OK;
-}
-
-s32_t ram_spiffs_erase(u32_t addr, u32_t size)
-{
-	memset(&spiffs_ramdisk_data[addr], 0xff, size);
-	return SPIFFS_OK;
-}
-
-static spiffs_config spiffs_cfg = {
-    .phys_size = FATFS_SECTOR_SIZE * 32,
-    .phys_addr = 0,
-    .phys_erase_block = 4096,
-    .log_block_size = 4096,
-    .log_page_size = 256,
-    .hal_read_f = ram_spiffs_read,
-    .hal_write_f = ram_spiffs_write,
-    .hal_erase_f = ram_spiffs_erase,
-};
 
 // Don't initialise because this is only used when USB connected
 static uint8_t __attribute__ ((section ("noinit"))) fatfs_ramdisk_data[FATFS_SECTOR_SIZE * FATFS_NUM_SECTORS];
@@ -58,19 +29,21 @@ static const struct fat_ramdisk fat_ramdisk = {
 	.data = fatfs_ramdisk_data,
 };
 
-static int copy_file_spiffs_to_fat(spiffs *spiffs, spiffs_file sfd, FIL *ffp, uint32_t size)
+static int copy_file_flash_to_fat(lfs_t *lfs, lfs_file_t *lfp, FIL *ffp, uint32_t size)
 {
 	char buf[128];
 	int res, nread, nwrote;
 
 	while (size) {
-		res = SPIFFS_read(spiffs, sfd, buf, sizeof(buf));
+		res = lfs_file_read(lfs, lfp, buf, sizeof(buf));
+		printf("file_read: %d\n", res);
 		if (res < 0) {
 			return res;
 		}
 		nread = res;
 
 		res = f_write(ffp, buf, nread, &nwrote);
+		printf("f_write: %d\n", res);
 		if (res < 0) {
 			return res;
 		} else if (nwrote != nread) {
@@ -83,60 +56,75 @@ static int copy_file_spiffs_to_fat(spiffs *spiffs, spiffs_file sfd, FIL *ffp, ui
 	return 0;
 }
 
-// Grr...
-#define SPIFFS_VIS_END -10072
-
-static int copy_spiffs_to_fat(spiffs *spiffs)
+static int copy_flash_to_fat(lfs_t *lfs)
 {
-	int spiffs_err;
-	int fatfs_err;
-	spiffs_DIR dir;
-	struct spiffs_dirent de;
+	lfs_dir_t dir;
+	struct lfs_info dirent;
 	FIL fp = { 0 };
+	int res;
 
-	SPIFFS_clearerr(spiffs);
-
-	SPIFFS_opendir(spiffs, "", &dir);
-	if (SPIFFS_errno(spiffs)) {
-		return SPIFFS_errno(spiffs);
+	res = lfs_dir_open(lfs, &dir, "");
+	printf("dir_open: %d\n", res);
+	if (res < 0) {
+		return res;
 	}
 
-	while (SPIFFS_readdir(&dir, &de)) {
+	int dir_res;
+	while ((dir_res = lfs_dir_read(lfs, &dir, &dirent)) > 0) {
 		char tmp_buf[128];
-		spiffs_file sfd = SPIFFS_open_by_dirent(spiffs, &de, SPIFFS_RDONLY, 0);
-		if (sfd < 0) {
+
+		if (dirent.type == LFS_TYPE_DIR) {
+			continue;
+		}
+
+		lfs_file_t lfp;
+		res = lfs_file_open(lfs, &lfp, dirent.name, LFS_O_RDONLY);
+		printf("file_open: %s, %d\n", dirent.name, res);
+		if (res < 0) {
 			break;
 		}
 
-		fatfs_err = f_open(&fp, de.name, FA_WRITE | FA_CREATE_ALWAYS);
-		if (fatfs_err) {
+		res = f_open(&fp, dirent.name, FA_WRITE | FA_CREATE_ALWAYS);
+		printf("f_open: %d\n", res);
+		if (res) {
 			break;
 		}
 
-		fatfs_err = copy_file_spiffs_to_fat(spiffs, sfd, &fp, de.size);
-		if (fatfs_err) {
+		res = copy_file_flash_to_fat(lfs, &lfp, &fp, dirent.size);
+		printf("copy_file: %d\n", res);
+		if (res) {
 			break;
 		}
 
-		SPIFFS_close(spiffs, sfd);
+		res = lfs_file_close(lfs, &lfp);
+		printf("file_close: %d\n", res);
+		if (res < 0) {
+			break;
+		}
 
-		fatfs_err = f_close(&fp);
-		if (fatfs_err) {
+		res = f_close(&fp);
+		printf("f_close: %d\n", res);
+		if (res) {
 			break;
 		}
 	}
-	spiffs_err = SPIFFS_errno(spiffs);
-	SPIFFS_closedir(&dir);
-	spiffs_err = SPIFFS_errno(spiffs);
 
-	if ((spiffs_err && (spiffs_err != SPIFFS_VIS_END)) || fatfs_err) {
+	lfs_dir_close(lfs, &dir);
+
+	printf("dir_res: %d\n", dir_res);
+	if (dir_res != 0) {
+		return -1;
+	}
+
+	printf("res: %d\n", res);
+	if (res) {
 		return -1;
 	}
 
 	return 0;
 }
 
-static void init_fat_from(spiffs *spiffs, struct usb_msc_disk *msc_disk)
+static void init_fat_from(lfs_t *lfs, struct usb_msc_disk *msc_disk)
 {
 	msc_disk->block_size = fat_ramdisk.sector_size;
 	msc_disk->num_blocks = fat_ramdisk.num_sectors;
@@ -151,9 +139,10 @@ static void init_fat_from(spiffs *spiffs, struct usb_msc_disk *msc_disk)
 		goto err_out;
 	}
 
-	res = copy_spiffs_to_fat(spiffs);
+	res = copy_flash_to_fat(lfs);
 	if (res) {
-		snprintf(error_buf, sizeof(error_buf), "Copy spiffs to FatFS failed", res);
+		printf("flash to fat failed: %d\n", res);
+		snprintf(error_buf, sizeof(error_buf), "Copy spiffs to FatFS failed: %d", res);
 		goto err_unmount;
 	}
 
@@ -171,30 +160,97 @@ err_out:
 
 static void init_filesystem(struct usb_msc_disk *msc_disk)
 {
-	static spiffs fs;
-	static u8_t spiffs_work_buf[256*2];
-	static u8_t spiffs_fds[32*2];
-	static u8_t spiffs_cache_buf[(256+32)*4];
+	static uint8_t buf[4096 * 4];
+	static lfs_t lfs = { 0 };
+	lfs_file_t lfp = { 0 };
+	lfs_rambd_t bd = { 0 };
+	const struct lfs_config lfs_cfg = {
+		.context = &bd,
+		// block device operations
+		.read  = lfs_rambd_read,
+		.prog  = lfs_rambd_prog,
+		.erase = lfs_rambd_erase,
+		.sync  = lfs_rambd_sync,
+
+		// block device configuration
+		.read_size = 1,
+		.prog_size = 256,
+		.block_size = 4096,
+		.block_count = 4,
+		.cache_size = 256,
+		.lookahead_size = 4,
+		.block_cycles = 500,
+	};
+
+	printf("bd buffer: %p\n", buf);
+
 	char error_buf[32];
+	const char *str = "Hello world from lfs";
+	int res;
 
-	memset(spiffs_ramdisk_data, 0xff, sizeof(spiffs_ramdisk_data));
+	res = lfs_rambd_create(&lfs_cfg);
+	printf("rambd_create: %d\n", res);
+	if (res < 0) {
+		return;
+	}
 
-	int res = SPIFFS_mount(&fs,
-			&spiffs_cfg,
-			spiffs_work_buf,
-			spiffs_fds,
-			sizeof(spiffs_fds),
-			spiffs_cache_buf,
-			sizeof(spiffs_cache_buf),
-			0);
+	res = lfs_format(&lfs, &lfs_cfg);
+	printf("format: %d\n", res);
+	if (res) {
+		goto err_out;
+	}
 
-	spiffs_file fd = SPIFFS_open(&fs, "readme.txt", SPIFFS_CREAT | SPIFFS_TRUNC | SPIFFS_RDWR, 0);
+	// mount the filesystem
+	res = lfs_mount(&lfs, &lfs_cfg);
+	printf("mount: %d\n", res);
+	if (res) {
+		goto err_out;
+	}
 
-	const char *str = "Hello world from spiffs";
-	res = SPIFFS_write(&fs, fd, (u8_t *)str, strlen(str));
-	SPIFFS_close(&fs, fd);
+	/*
+	// reformat if we can't mount the filesystem
+	// this should only happen on the first boot
+	if (res) {
+		res = lfs_mount(&lfs, &lfs_cfg);
+		printf("mount2: %d\n", res);
+		if (res) {
+			goto err_unmount;
+		}
+	}
+	*/
 
-	init_fat_from(&fs, msc_disk);
+	res = lfs_file_open(&lfs, &lfp, "readme.txt", LFS_O_RDWR | LFS_O_CREAT);
+	printf("open1: %d\n", res);
+	if (res) {
+		return;
+	}
+
+	res = lfs_file_write(&lfs, &lfp, str, strlen(str));
+	printf("write: %d\n", res);
+	if (res != strlen(str)) {
+		goto err_close;
+	}
+
+	res = lfs_file_close(&lfs, &lfp);
+	printf("close: %d\n", res);
+	if (res) {
+		goto err_unmount;
+	}
+
+	init_fat_from(&lfs, msc_disk);
+
+	// release any resources we were using
+	lfs_unmount(&lfs);
+	lfs_rambd_destroy(&lfs_cfg);
+
+	return;
+
+err_close:
+	lfs_file_close(&lfs, &lfp);
+err_unmount:
+	lfs_unmount(&lfs);
+err_out:
+	lfs_rambd_destroy(&lfs_cfg);
 }
 
 queue_t msg_queue;
@@ -370,6 +426,12 @@ int main() {
 		case MSG_TYPE_CDC_CONNECTED:
 			printf("Hello CDC\n");
 			sleep_ms(100);
+			/*
+			{
+				struct usb_msc_disk disk;
+				init_filesystem(&disk);
+			}
+			*/
 			break;
 		case MSG_TYPE_USB_DISCONNECTED:
 			badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
