@@ -21,13 +21,20 @@
 #define FATFS_SECTOR_SIZE 512
 #define FATFS_NUM_SECTORS 128
 
+#define README_CONTENTS "This is the default file"
+
 struct lfs_flash_cfg {
 	bool multicore;
 	critical_section_t lock;
 	uint32_t base;
 };
 
-int flash_lfs_read(const struct lfs_config *cfg, lfs_block_t block,
+struct lfs_flash_cfg lfs_flash_cfg = {
+	// FIXME: The linker doesn't know anything about this
+	.base = PICO_FLASH_SIZE_BYTES - (4096 * 16),
+};
+
+int lfs_flash_read(const struct lfs_config *cfg, lfs_block_t block,
         lfs_off_t off, void *buffer, lfs_size_t size)
 {
 	struct lfs_flash_cfg *ctx = cfg->context;
@@ -40,7 +47,7 @@ int flash_lfs_read(const struct lfs_config *cfg, lfs_block_t block,
 	return 0;
 }
 
-int flash_lfs_prog(const struct lfs_config *cfg, lfs_block_t block,
+int lfs_flash_prog(const struct lfs_config *cfg, lfs_block_t block,
         lfs_off_t off, const void *buffer, lfs_size_t size)
 {
 	struct lfs_flash_cfg *ctx = cfg->context;
@@ -55,7 +62,7 @@ int flash_lfs_prog(const struct lfs_config *cfg, lfs_block_t block,
 	return 0;
 }
 
-int flash_lfs_erase(const struct lfs_config *cfg, lfs_block_t block)
+int lfs_flash_erase(const struct lfs_config *cfg, lfs_block_t block)
 {
 	struct lfs_flash_cfg *ctx = cfg->context;
 
@@ -69,10 +76,29 @@ int flash_lfs_erase(const struct lfs_config *cfg, lfs_block_t block)
 	return 0;
 }
 
-int flash_lfs_sync(const struct lfs_config *cfg)
+int lfs_flash_sync(const struct lfs_config *cfg)
 {
 	return 0;
 }
+
+const struct lfs_config lfs_cfg = {
+	.context = &lfs_flash_cfg,
+	// block device operations
+	.read  = lfs_flash_read,
+	.prog  = lfs_flash_prog,
+	.erase = lfs_flash_erase,
+	.sync  = lfs_flash_sync,
+
+	// block device configuration
+	.read_size = 1,
+	.prog_size = 256,
+	.block_size = 4096,
+	.block_count = 16,
+	.cache_size = 256,
+	.lookahead_size = 4,
+	.block_cycles = 500,
+};
+
 
 // Don't initialise because this is only used when USB connected
 static uint8_t __attribute__ ((section ("noinit"))) fatfs_ramdisk_data[FATFS_SECTOR_SIZE * FATFS_NUM_SECTORS];
@@ -178,119 +204,52 @@ static int copy_flash_to_fat(lfs_t *lfs)
 	return 0;
 }
 
-static void init_fat_from(lfs_t *lfs, struct usb_msc_disk *msc_disk)
+static int lfs_init(lfs_t *lfs, bool multicore)
 {
-	msc_disk->block_size = fat_ramdisk.sector_size;
-	msc_disk->num_blocks = fat_ramdisk.num_sectors;
-	msc_disk->data = fat_ramdisk.data;
-	msc_disk->read_only = false;
+	critical_section_init(&lfs_flash_cfg.lock);
+	lfs_flash_cfg.multicore = multicore;
 
-	char error_buf[32];
-
-	FRESULT res = fat_ramdisk_init(&fat_ramdisk);
-	if (res) {
-		snprintf(error_buf, sizeof(error_buf), "FatFS initialisation failed: %d", res);
-		goto err_out;
-	}
-
-	res = copy_flash_to_fat(lfs);
-	if (res) {
-		printf("flash to fat failed: %d\n", res);
-		snprintf(error_buf, sizeof(error_buf), "Copy spiffs to FatFS failed: %d", res);
-		goto err_unmount;
-	}
-
-	f_unmount("");
-
-	return;
-
-err_unmount:
-	f_unmount("");
-err_out:
-	init_error_filesystem(&fat_ramdisk, error_buf);
-	msc_disk->read_only = true;
-	return;
-}
-
-static void init_filesystem(struct usb_msc_disk *msc_disk)
-{
-	static lfs_t lfs = { 0 };
-	static struct lfs_flash_cfg flash_cfg = {
-		// FIXME: The linker doesn't know anything about this
-		.base = PICO_FLASH_SIZE_BYTES - (4096 * 16),
-	};
-	const struct lfs_config lfs_cfg = {
-		.context = &flash_cfg,
-		// block device operations
-		.read  = flash_lfs_read,
-		.prog  = flash_lfs_prog,
-		.erase = flash_lfs_erase,
-		.sync  = flash_lfs_sync,
-
-		// block device configuration
-		.read_size = 1,
-		.prog_size = 256,
-		.block_size = 4096,
-		.block_count = 16,
-		.cache_size = 256,
-		.lookahead_size = 4,
-		.block_cycles = 500,
-	};
-	lfs_file_t lfp = { 0 };
-
-	char error_buf[32];
-	const char *str = "Hello world from lfs";
-	int res;
-
-	// mount the filesystem
-	res = lfs_mount(&lfs, &lfs_cfg);
-	printf("mount: %d\n", res);
+	int res = lfs_mount(lfs, &lfs_cfg);
 	if (res) {
 		// On first try, format and write an initial file
-		res = lfs_format(&lfs, &lfs_cfg);
-		printf("format: %d\n", res);
+		lfs_file_t lfp = { 0 };
+
+		res = lfs_format(lfs, &lfs_cfg);
 		if (res) {
 			goto err_out;
 		}
 
-		res = lfs_mount(&lfs, &lfs_cfg);
-		printf("mount2: %d\n", res);
+		res = lfs_mount(lfs, &lfs_cfg);
+		if (res) {
+			goto err_out;
+		}
+
+		res = lfs_file_open(lfs, &lfp, "readme.txt", LFS_O_RDWR | LFS_O_CREAT);
 		if (res) {
 			goto err_unmount;
 		}
 
-		res = lfs_file_open(&lfs, &lfp, "readme.txt", LFS_O_RDWR | LFS_O_CREAT);
-		printf("open1: %d\n", res);
-		if (res) {
-			return;
-		}
+		lfs_file_write(lfs, &lfp, README_CONTENTS, strlen(README_CONTENTS));
 
-		res = lfs_file_write(&lfs, &lfp, str, strlen(str));
-		printf("write: %d\n", res);
-		if (res != strlen(str)) {
-			goto err_close;
-		}
-
-		res = lfs_file_close(&lfs, &lfp);
-		printf("close: %d\n", res);
+		res = lfs_file_close(lfs, &lfp);
 		if (res) {
 			goto err_unmount;
 		}
 	}
 
-	init_fat_from(&lfs, msc_disk);
+	return 0;
 
-	// release any resources we were using
-	lfs_unmount(&lfs);
-
-	return;
-
-err_close:
-	lfs_file_close(&lfs, &lfp);
 err_unmount:
-	lfs_unmount(&lfs);
+	lfs_unmount(lfs);
 err_out:
-	lfs_rambd_destroy(&lfs_cfg);
+	critical_section_deinit(&lfs_flash_cfg.lock);
+	return res;
+}
+
+static void lfs_term(lfs_t *lfs)
+{
+	lfs_unmount(lfs);
+	critical_section_deinit(&lfs_flash_cfg.lock);
 }
 
 queue_t msg_queue;
@@ -333,7 +292,7 @@ static void usb_cdc_line_state_cb(void *user, uint8_t itf, bool dtr, bool rts)
 	}
 }
 
-static struct usb_opt opt = {
+static struct usb_opt usb_opt = {
 	.user = NULL,
 	.connect_cb = usb_connect_cb,
 	.disconnect_cb = usb_disconnect_cb,
@@ -352,10 +311,60 @@ static struct usb_opt opt = {
 
 void core1_main()
 {
-	usb_main(&opt);
+	multicore_lockout_victim_init();
+	queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_USB_CONNECTING });
+
+	usb_main(&usb_opt);
 
 	// Will never reach here
 	return;
+}
+
+void prepare_usb_filesystem(struct usb_msc_disk *msc_disk)
+{
+	int res;
+	char error_buf[64];
+	lfs_t lfs;
+
+	// Set-up the FAT singleton - this leaves the filesystem mounted
+	res = fat_ramdisk_init(&fat_ramdisk);
+	if (res) {
+		snprintf(error_buf, sizeof(error_buf), "FatFS initialisation failed: %d", res);
+		goto done;
+	}
+
+	// Core 1 isn't running yet, so no multicore
+	res = lfs_init(&lfs, false);
+	if (res) {
+		snprintf(error_buf, sizeof(error_buf), "littlefs initialisation failed: %d", res);
+		goto fatfs_unmount;
+	}
+
+	res = copy_flash_to_fat(&lfs);
+	if (res) {
+		snprintf(error_buf, sizeof(error_buf), "copy flash to MSC failed: %d", res);
+		goto lfs_unmount;
+	}
+
+lfs_unmount:
+	lfs_term(&lfs);
+fatfs_unmount:
+	f_unmount("");
+done:
+	if (res) {
+		init_error_filesystem(&fat_ramdisk, error_buf);
+	}
+	msc_disk->block_size = fat_ramdisk.sector_size;
+	msc_disk->num_blocks = fat_ramdisk.num_sectors;
+	msc_disk->data = fat_ramdisk.data;
+	msc_disk->read_only = (res != 0);
+	return;
+}
+
+void launch_usb()
+{
+	prepare_usb_filesystem(&usb_opt.msc.disk);
+	multicore_launch_core1(core1_main);
 }
 
 static int64_t usb_connect_timeout(alarm_id_t id, void *d)
@@ -410,12 +419,11 @@ int main() {
 	badger_update(true);
 
 	if (gpio_get(BADGER_PIN_VBUS_DETECT)) {
-		init_filesystem(&opt.msc.disk);
-		queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_USB_CONNECTING });
-		multicore_launch_core1(core1_main);
+		launch_usb();
 	}
 
 	bool usb_connected = false;
+	bool multicore = false;
 
 	for ( ;; ) {
 		/*
@@ -430,6 +438,7 @@ int main() {
 		queue_remove_blocking(&msg_queue, &msg);
 		switch (msg.type) {
 		case MSG_TYPE_USB_CONNECTING:
+			multicore = true;
 			badger_text("USB connecting", 10, 16, 0.4f, 0.0f, 1);
 			badger_partial_update(0, 8, 296, 16, true);
 
