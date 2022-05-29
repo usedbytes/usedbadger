@@ -8,6 +8,7 @@
 #include "pico/platform.h"
 #include "pico/multicore.h"
 
+#include "spiffs/src/spiffs.h"
 #include "badger.h"
 #include "fatfs/ff.h"
 #include "error_disk.h"
@@ -16,6 +17,37 @@
 
 #define FATFS_SECTOR_SIZE 512
 #define FATFS_NUM_SECTORS 128
+
+static uint8_t __attribute__ ((section ("noinit"))) spiffs_ramdisk_data[FATFS_SECTOR_SIZE * 32];
+
+s32_t ram_spiffs_read(u32_t addr, u32_t size, u8_t *dst)
+{
+	memcpy(dst, &spiffs_ramdisk_data[addr], size);
+	return SPIFFS_OK;
+}
+
+s32_t ram_spiffs_write(u32_t addr, u32_t size, u8_t *src)
+{
+	memcpy(&spiffs_ramdisk_data[addr], src, size);
+	return SPIFFS_OK;
+}
+
+s32_t ram_spiffs_erase(u32_t addr, u32_t size)
+{
+	memset(&spiffs_ramdisk_data[addr], 0xff, size);
+	return SPIFFS_OK;
+}
+
+static spiffs_config spiffs_cfg = {
+    .phys_size = FATFS_SECTOR_SIZE * 32,
+    .phys_addr = 0,
+    .phys_erase_block = 4096,
+    .log_block_size = 4096,
+    .log_page_size = 256,
+    .hal_read_f = ram_spiffs_read,
+    .hal_write_f = ram_spiffs_write,
+    .hal_erase_f = ram_spiffs_erase,
+};
 
 // Don't initialise because this is only used when USB connected
 static uint8_t __attribute__ ((section ("noinit"))) fatfs_ramdisk_data[FATFS_SECTOR_SIZE * FATFS_NUM_SECTORS];
@@ -26,38 +58,102 @@ static const struct fat_ramdisk fat_ramdisk = {
 	.data = fatfs_ramdisk_data,
 };
 
-static void init_filesystem(struct usb_msc_disk *msc_disk)
+static int copy_file_spiffs_to_fat(spiffs *spiffs, spiffs_file sfd, FIL *ffp, uint32_t size)
+{
+	char buf[128];
+	int res, nread, nwrote;
+
+	while (size) {
+		res = SPIFFS_read(spiffs, sfd, buf, sizeof(buf));
+		if (res < 0) {
+			return res;
+		}
+		nread = res;
+
+		res = f_write(ffp, buf, nread, &nwrote);
+		if (res < 0) {
+			return res;
+		} else if (nwrote != nread) {
+			return -1;
+		}
+
+		size -= nread;
+	}
+
+	return 0;
+}
+
+// Grr...
+#define SPIFFS_VIS_END -10072
+
+static int copy_spiffs_to_fat(spiffs *spiffs)
+{
+	int spiffs_err;
+	int fatfs_err;
+	spiffs_DIR dir;
+	struct spiffs_dirent de;
+	FIL fp = { 0 };
+
+	SPIFFS_clearerr(spiffs);
+
+	SPIFFS_opendir(spiffs, "", &dir);
+	if (SPIFFS_errno(spiffs)) {
+		return SPIFFS_errno(spiffs);
+	}
+
+	while (SPIFFS_readdir(&dir, &de)) {
+		char tmp_buf[128];
+		spiffs_file sfd = SPIFFS_open_by_dirent(spiffs, &de, SPIFFS_RDONLY, 0);
+		if (sfd < 0) {
+			break;
+		}
+
+		fatfs_err = f_open(&fp, de.name, FA_WRITE | FA_CREATE_ALWAYS);
+		if (fatfs_err) {
+			break;
+		}
+
+		fatfs_err = copy_file_spiffs_to_fat(spiffs, sfd, &fp, de.size);
+		if (fatfs_err) {
+			break;
+		}
+
+		SPIFFS_close(spiffs, sfd);
+
+		fatfs_err = f_close(&fp);
+		if (fatfs_err) {
+			break;
+		}
+	}
+	spiffs_err = SPIFFS_errno(spiffs);
+	SPIFFS_closedir(&dir);
+	spiffs_err = SPIFFS_errno(spiffs);
+
+	if ((spiffs_err && (spiffs_err != SPIFFS_VIS_END)) || fatfs_err) {
+		return -1;
+	}
+
+	return 0;
+}
+
+static void init_fat_from(spiffs *spiffs, struct usb_msc_disk *msc_disk)
 {
 	msc_disk->block_size = fat_ramdisk.sector_size;
 	msc_disk->num_blocks = fat_ramdisk.num_sectors;
 	msc_disk->data = fat_ramdisk.data;
 	msc_disk->read_only = false;
 
-	FIL fp = { 0 };
-	UINT bw;
-	const char *contents = "This is the readme written via fatfs";
 	char error_buf[32];
+
 	FRESULT res = fat_ramdisk_init(&fat_ramdisk);
 	if (res) {
 		snprintf(error_buf, sizeof(error_buf), "FatFS initialisation failed: %d", res);
 		goto err_out;
 	}
 
-	res = f_open(&fp, "readme.txt", FA_WRITE | FA_CREATE_ALWAYS);
+	res = copy_spiffs_to_fat(spiffs);
 	if (res) {
-		snprintf(error_buf, sizeof(error_buf), "f_open: %d", res);
-		goto err_unmount;
-	}
-
-	res = f_write(&fp, contents, strlen(contents), &bw);
-	if (res) {
-		snprintf(error_buf, sizeof(error_buf), "f_write: %d", res);
-		goto err_close;
-	}
-
-	res = f_close(&fp);
-	if (res) {
-		snprintf(error_buf, sizeof(error_buf), "f_close: %d", res);
+		snprintf(error_buf, sizeof(error_buf), "Copy spiffs to FatFS failed", res);
 		goto err_unmount;
 	}
 
@@ -65,14 +161,40 @@ static void init_filesystem(struct usb_msc_disk *msc_disk)
 
 	return;
 
-err_close:
-	f_close(&fp);
 err_unmount:
 	f_unmount("");
 err_out:
 	init_error_filesystem(&fat_ramdisk, error_buf);
 	msc_disk->read_only = true;
 	return;
+}
+
+static void init_filesystem(struct usb_msc_disk *msc_disk)
+{
+	static spiffs fs;
+	static u8_t spiffs_work_buf[256*2];
+	static u8_t spiffs_fds[32*2];
+	static u8_t spiffs_cache_buf[(256+32)*4];
+	char error_buf[32];
+
+	memset(spiffs_ramdisk_data, 0xff, sizeof(spiffs_ramdisk_data));
+
+	int res = SPIFFS_mount(&fs,
+			&spiffs_cfg,
+			spiffs_work_buf,
+			spiffs_fds,
+			sizeof(spiffs_fds),
+			spiffs_cache_buf,
+			sizeof(spiffs_cache_buf),
+			0);
+
+	spiffs_file fd = SPIFFS_open(&fs, "readme.txt", SPIFFS_CREAT | SPIFFS_TRUNC | SPIFFS_RDWR, 0);
+
+	const char *str = "Hello world from spiffs";
+	res = SPIFFS_write(&fs, fd, (u8_t *)str, strlen(str));
+	SPIFFS_close(&fs, fd);
+
+	init_fat_from(&fs, msc_disk);
 }
 
 queue_t msg_queue;
@@ -191,16 +313,16 @@ int main() {
 
 	queue_init(&msg_queue, sizeof(struct msg), 8);
 
-	if (gpio_get(BADGER_PIN_VBUS_DETECT)) {
-		queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_USB_CONNECTING });
-		multicore_launch_core1(core1_main);
-	}
-
 	badger_pen(15);
 	badger_clear();
 	badger_pen(0);
 	badger_update_speed(1);
 	badger_update(true);
+
+	if (gpio_get(BADGER_PIN_VBUS_DETECT)) {
+		queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_USB_CONNECTING });
+		multicore_launch_core1(core1_main);
+	}
 
 	bool usb_connected = false;
 
@@ -247,6 +369,7 @@ int main() {
 			break;
 		case MSG_TYPE_CDC_CONNECTED:
 			printf("Hello CDC\n");
+			sleep_ms(100);
 			break;
 		case MSG_TYPE_USB_DISCONNECTED:
 			badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);

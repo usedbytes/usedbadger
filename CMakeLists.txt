@@ -31,6 +31,14 @@ add_executable(${NAME}
     ${CMAKE_CURRENT_LIST_DIR}/fat_ramdisk.c
     ${CMAKE_CURRENT_LIST_DIR}/fatfs/ff.c
     ${CMAKE_CURRENT_LIST_DIR}/fatfs/ffunicode.c
+
+    ${CMAKE_CURRENT_LIST_DIR}/spiffs/src/spiffs.h
+    ${CMAKE_CURRENT_LIST_DIR}/spiffs/src/spiffs_cache.c
+    ${CMAKE_CURRENT_LIST_DIR}/spiffs/src/spiffs_check.c
+    ${CMAKE_CURRENT_LIST_DIR}/spiffs/src/spiffs_gc.c
+    ${CMAKE_CURRENT_LIST_DIR}/spiffs/src/spiffs_hydrogen.c
+    ${CMAKE_CURRENT_LIST_DIR}/spiffs/src/spiffs_nucleus.c
+    ${CMAKE_CURRENT_LIST_DIR}/spiffs/src/spiffs_nucleus.h
 )
 
 # Make sure TinyUSB can find tusb_config.h
