@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
@@ -19,6 +20,59 @@
 
 #define FATFS_SECTOR_SIZE 512
 #define FATFS_NUM_SECTORS 128
+
+struct lfs_flash_cfg {
+	bool multicore;
+	critical_section_t lock;
+	uint32_t base;
+};
+
+int flash_lfs_read(const struct lfs_config *cfg, lfs_block_t block,
+        lfs_off_t off, void *buffer, lfs_size_t size)
+{
+	struct lfs_flash_cfg *ctx = cfg->context;
+	uint32_t flash_offs = ctx->base + (block * cfg->block_size) + off;
+
+	uint8_t *src = (uint8_t *)(XIP_BASE + flash_offs);
+
+	memcpy(buffer, src, size);
+
+	return 0;
+}
+
+int flash_lfs_prog(const struct lfs_config *cfg, lfs_block_t block,
+        lfs_off_t off, const void *buffer, lfs_size_t size)
+{
+	struct lfs_flash_cfg *ctx = cfg->context;
+
+	critical_section_enter_blocking(&ctx->lock);
+
+	uint32_t flash_offs = ctx->base + (block * cfg->block_size) + off;
+	flash_range_program(flash_offs, buffer, size);
+
+	critical_section_exit(&ctx->lock);
+
+	return 0;
+}
+
+int flash_lfs_erase(const struct lfs_config *cfg, lfs_block_t block)
+{
+	struct lfs_flash_cfg *ctx = cfg->context;
+
+	critical_section_enter_blocking(&ctx->lock);
+
+	uint32_t flash_offs = ctx->base + (block * cfg->block_size);
+	flash_range_erase(flash_offs, cfg->block_size);
+
+	critical_section_exit(&ctx->lock);
+
+	return 0;
+}
+
+int flash_lfs_sync(const struct lfs_config *cfg)
+{
+	return 0;
+}
 
 // Don't initialise because this is only used when USB connected
 static uint8_t __attribute__ ((section ("noinit"))) fatfs_ramdisk_data[FATFS_SECTOR_SIZE * FATFS_NUM_SECTORS];
@@ -160,88 +214,74 @@ err_out:
 
 static void init_filesystem(struct usb_msc_disk *msc_disk)
 {
-	static uint8_t buf[4096 * 4];
 	static lfs_t lfs = { 0 };
-	lfs_file_t lfp = { 0 };
-	lfs_rambd_t bd = { 0 };
+	static struct lfs_flash_cfg flash_cfg = {
+		// FIXME: The linker doesn't know anything about this
+		.base = PICO_FLASH_SIZE_BYTES - (4096 * 16),
+	};
 	const struct lfs_config lfs_cfg = {
-		.context = &bd,
+		.context = &flash_cfg,
 		// block device operations
-		.read  = lfs_rambd_read,
-		.prog  = lfs_rambd_prog,
-		.erase = lfs_rambd_erase,
-		.sync  = lfs_rambd_sync,
+		.read  = flash_lfs_read,
+		.prog  = flash_lfs_prog,
+		.erase = flash_lfs_erase,
+		.sync  = flash_lfs_sync,
 
 		// block device configuration
 		.read_size = 1,
 		.prog_size = 256,
 		.block_size = 4096,
-		.block_count = 4,
+		.block_count = 16,
 		.cache_size = 256,
 		.lookahead_size = 4,
 		.block_cycles = 500,
 	};
-
-	printf("bd buffer: %p\n", buf);
+	lfs_file_t lfp = { 0 };
 
 	char error_buf[32];
 	const char *str = "Hello world from lfs";
 	int res;
 
-	res = lfs_rambd_create(&lfs_cfg);
-	printf("rambd_create: %d\n", res);
-	if (res < 0) {
-		return;
-	}
-
-	res = lfs_format(&lfs, &lfs_cfg);
-	printf("format: %d\n", res);
-	if (res) {
-		goto err_out;
-	}
-
 	// mount the filesystem
 	res = lfs_mount(&lfs, &lfs_cfg);
 	printf("mount: %d\n", res);
 	if (res) {
-		goto err_out;
-	}
+		// On first try, format and write an initial file
+		res = lfs_format(&lfs, &lfs_cfg);
+		printf("format: %d\n", res);
+		if (res) {
+			goto err_out;
+		}
 
-	/*
-	// reformat if we can't mount the filesystem
-	// this should only happen on the first boot
-	if (res) {
 		res = lfs_mount(&lfs, &lfs_cfg);
 		printf("mount2: %d\n", res);
 		if (res) {
 			goto err_unmount;
 		}
-	}
-	*/
 
-	res = lfs_file_open(&lfs, &lfp, "readme.txt", LFS_O_RDWR | LFS_O_CREAT);
-	printf("open1: %d\n", res);
-	if (res) {
-		return;
-	}
+		res = lfs_file_open(&lfs, &lfp, "readme.txt", LFS_O_RDWR | LFS_O_CREAT);
+		printf("open1: %d\n", res);
+		if (res) {
+			return;
+		}
 
-	res = lfs_file_write(&lfs, &lfp, str, strlen(str));
-	printf("write: %d\n", res);
-	if (res != strlen(str)) {
-		goto err_close;
-	}
+		res = lfs_file_write(&lfs, &lfp, str, strlen(str));
+		printf("write: %d\n", res);
+		if (res != strlen(str)) {
+			goto err_close;
+		}
 
-	res = lfs_file_close(&lfs, &lfp);
-	printf("close: %d\n", res);
-	if (res) {
-		goto err_unmount;
+		res = lfs_file_close(&lfs, &lfp);
+		printf("close: %d\n", res);
+		if (res) {
+			goto err_unmount;
+		}
 	}
 
 	init_fat_from(&lfs, msc_disk);
 
 	// release any resources we were using
 	lfs_unmount(&lfs);
-	lfs_rambd_destroy(&lfs_cfg);
 
 	return;
 
@@ -293,31 +333,25 @@ static void usb_cdc_line_state_cb(void *user, uint8_t itf, bool dtr, bool rts)
 	}
 }
 
-static const struct usb_opt usb_opt = {
+static struct usb_opt opt = {
+	.user = NULL,
 	.connect_cb = usb_connect_cb,
 	.disconnect_cb = usb_disconnect_cb,
+	.cdc = {
+		.line_state_cb = usb_cdc_line_state_cb,
+	},
+	.msc = {
+		.disk = {
+			.vid = "usedbytes",
+			.pid = "usedbadger mass storage",
+			.rev = "1.0",
+		},
+		.start_stop_cb = usb_msc_start_stop_cb,
+	},
 };
 
 void core1_main()
 {
-	static struct usb_opt opt = {
-		.user = NULL,
-		.connect_cb = usb_connect_cb,
-		.disconnect_cb = usb_disconnect_cb,
-		.cdc = {
-			.line_state_cb = usb_cdc_line_state_cb,
-		},
-		.msc = {
-			.disk = {
-				.vid = "usedbytes",
-				.pid = "usedbadger mass storage",
-				.rev = "1.0",
-			},
-			.start_stop_cb = usb_msc_start_stop_cb,
-		},
-	};
-
-	init_filesystem(&opt.msc.disk);
 	usb_main(&opt);
 
 	// Will never reach here
@@ -376,6 +410,7 @@ int main() {
 	badger_update(true);
 
 	if (gpio_get(BADGER_PIN_VBUS_DETECT)) {
+		init_filesystem(&opt.msc.disk);
 		queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_USB_CONNECTING });
 		multicore_launch_core1(core1_main);
 	}
