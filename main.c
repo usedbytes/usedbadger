@@ -272,12 +272,14 @@ queue_t msg_queue;
 
 enum msg_type {
 	MSG_TYPE_NONE = 0,
+	MSG_TYPE_CORE1_LAUNCHED,
 	MSG_TYPE_USB_CONNECTING,
 	MSG_TYPE_USB_TIMEOUT,
 	MSG_TYPE_USB_CONNECTED,
 	MSG_TYPE_USB_DISCONNECTED,
 	MSG_TYPE_MSC_UNMOUNTED,
 	MSG_TYPE_CDC_CONNECTED,
+	MSG_TYPE_POWER_OFF,
 };
 
 struct msg {
@@ -328,7 +330,7 @@ static struct usb_opt usb_opt = {
 void core1_main()
 {
 	multicore_lockout_victim_init();
-	queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_USB_CONNECTING });
+	queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_CORE1_LAUNCHED });
 
 	usb_main(&usb_opt);
 
@@ -336,11 +338,10 @@ void core1_main()
 	return;
 }
 
-void prepare_usb_filesystem(struct usb_msc_disk *msc_disk)
+void prepare_usb_filesystem(lfs_t *lfs, struct usb_msc_disk *msc_disk)
 {
 	int res;
 	char error_buf[64];
-	lfs_t lfs;
 
 	// Set-up the FAT singleton - this leaves the filesystem mounted
 	res = fat_ramdisk_init(&fat_ramdisk);
@@ -349,21 +350,11 @@ void prepare_usb_filesystem(struct usb_msc_disk *msc_disk)
 		goto done;
 	}
 
-	// Core 1 isn't running yet, so no multicore
-	res = lfs_init(&lfs, false);
-	if (res) {
-		snprintf(error_buf, sizeof(error_buf), "littlefs initialisation failed: %d", res);
-		goto fatfs_unmount;
-	}
-
-	res = copy_flash_to_fat(&lfs);
+	res = copy_flash_to_fat(lfs);
 	if (res) {
 		snprintf(error_buf, sizeof(error_buf), "copy flash to MSC failed: %d", res);
-		goto lfs_unmount;
 	}
 
-lfs_unmount:
-	lfs_term(&lfs);
 fatfs_unmount:
 	f_unmount("");
 done:
@@ -379,7 +370,6 @@ done:
 
 void launch_usb()
 {
-	prepare_usb_filesystem(&usb_opt.msc.disk);
 	multicore_launch_core1(core1_main);
 }
 
@@ -390,126 +380,192 @@ static int64_t usb_connect_timeout(alarm_id_t id, void *d)
 	return 0;
 }
 
-int main() {
-	char message[128];
-	const char *button = "";
-	badger_init();
+static int power_ref = 0;
+static alarm_id_t power_alarm;
+#define POWER_DOWN_MS 1000
+static int64_t power_timeout(alarm_id_t id, void *d)
+{
+	queue_add_blocking(&msg_queue, &(struct msg){ .type = MSG_TYPE_POWER_OFF });
 
+	return 0;
+}
+static void power_ref_get()
+{
+	power_ref++;
+	gpio_put(BADGER_PIN_ENABLE_3V3, 1);
+
+	cancel_alarm(power_alarm);
+}
+
+static void power_ref_put()
+{
+	power_ref--;
+
+	if (power_ref == 0) {
+		power_alarm = add_alarm_in_ms(POWER_DOWN_MS, power_timeout, NULL, true);
+	}
+}
+
+int main() {
+	enum {
+		USB_STATE_NONE,
+		USB_STATE_WAITING,
+		USB_STATE_MOUNTED,
+		USB_STATE_UNMOUNTED,
+	} usb_state = USB_STATE_NONE;
+	enum {
+		LFS_STATE_NONE,
+		LFS_STATE_ERROR,
+		LFS_STATE_MOUNTED,
+		LFS_STATE_UNMOUNTED,
+	} lfs_state = LFS_STATE_NONE;
+	lfs_t lfs;
+	bool multicore = false;
+	int res;
+
+	badger_init();
 	badger_led(255);
 
-	// Nothing needs power yet
-	int power_ref = 0;
-
-	if (!gpio_get(BADGER_PIN_VBUS_DETECT)) {
-		// find which button was used to wake up
-		if(badger_pressed_to_wake(BADGER_PIN_A)) { button = "A"; }
-		if(badger_pressed_to_wake(BADGER_PIN_B)) { button = "B"; }
-		if(badger_pressed_to_wake(BADGER_PIN_C)) { button = "C"; }
-		if(badger_pressed_to_wake(BADGER_PIN_D)) { button = "D"; }
-		if(badger_pressed_to_wake(BADGER_PIN_E)) { button = "E"; }
-
-		if(button != "") {
-			snprintf(message, sizeof(message), "On battery, button %s", button);
-		}
-
-		badger_thickness(2);
-
-		badger_pen(15);
-		badger_clear();
-		badger_pen(0);
-		badger_text(message, 10, 20, 0.6f, 0.0f, 1);
-		badger_update(true);
-
-		badger_text("sleeping", 10, 72, 0.4f, 0.0f, 1);
-		badger_partial_update(0, 64, 296, 16, true);
-
-		badger_halt();
-	}
+	// Hold power alive for boot-up
+	power_ref_get();
 
 	queue_init(&msg_queue, sizeof(struct msg), 8);
 
+	// Unconditionally mount LFS to start with
+	res = lfs_init(&lfs, false);
+	if (res) {
+		lfs_state = LFS_STATE_ERROR;
+		// How to handle error?
+	} else {
+		lfs_state = LFS_STATE_MOUNTED;
+	}
+
+	if (gpio_get(BADGER_PIN_VBUS_DETECT)) {
+		// Hold power until USB has had a chance to connect
+		power_ref_get();
+		prepare_usb_filesystem(&lfs, &usb_opt.msc.disk);
+
+		// Flash access not safe any more, need to remount as multicore
+		lfs_term(&lfs);
+		lfs_state = LFS_STATE_UNMOUNTED;
+		usb_state = USB_STATE_WAITING;
+
+		launch_usb();
+	} else {
+		usb_state = USB_STATE_UNMOUNTED;
+	}
+
+	// TODO: Always?
 	badger_pen(15);
 	badger_clear();
 	badger_pen(0);
 	badger_update_speed(1);
 	badger_update(true);
 
-	if (gpio_get(BADGER_PIN_VBUS_DETECT)) {
-		launch_usb();
-	}
+	// Boot-up done
+	power_ref_put();
 
-	bool usb_connected = false;
-	bool multicore = false;
+	// TODO: Implement buttons
+	bool buttons_pressed = false;
+	// TODO: Should really just do the refresh while still holding the reference
+	bool refresh = true;
 
 	for ( ;; ) {
-		/*
-		char buf[10];
-		sprintf(buf, "%d", n++);
-		badger_text(buf, 10, 24, 0.4f, 0.0f, 1);
-		badger_partial_update(0, 16, 296, 16, true);
-		sleep_ms(300);
-		*/
-
 		struct msg msg;
-		queue_remove_blocking(&msg_queue, &msg);
-		switch (msg.type) {
-		case MSG_TYPE_USB_CONNECTING:
-			multicore = true;
-			badger_text("USB connecting", 10, 16, 0.4f, 0.0f, 1);
-			badger_partial_update(0, 8, 296, 16, true);
+		while (queue_try_remove(&msg_queue, &msg)) {
+			switch (msg.type) {
+			case MSG_TYPE_CORE1_LAUNCHED:
+				multicore = true;
 
-			// Keep power long enough to handle disconnect
-			power_ref++;
-			gpio_put(BADGER_PIN_ENABLE_3V3, 1);
+				// Start timeout for ->UNMOUNTED
+				add_alarm_in_ms(1000, usb_connect_timeout, NULL, true);
 
-			add_alarm_in_ms(1000, usb_connect_timeout, NULL, true);
-			break;
-		case MSG_TYPE_USB_TIMEOUT:
-			if (usb_connected) {
+				break;
+			case MSG_TYPE_USB_TIMEOUT:
+				if (usb_state == USB_STATE_WAITING) {
+					usb_state = USB_STATE_UNMOUNTED;
+
+					// Show buttons
+					refresh = true;
+				}
+				power_ref_put();
+				break;
+			case MSG_TYPE_USB_CONNECTED:
+				// Show USB screen
+				badger_text("USB connected", 10, 24, 0.4f, 0.0f, 1);
+				badger_partial_update(0, 16, 296, 16, true);
+
+				usb_state = USB_STATE_MOUNTED;
+				power_ref_get();
+				break;
+			case MSG_TYPE_USB_DISCONNECTED:
+				badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
+				badger_partial_update(0, 24, 296, 16, true);
+
+				// TODO: Do flash update
+				// To be totally safe, should also take away the MSC disk here
+				//   mount FatFS
+				//   mount LFS
+				//   Update FLS from FatFS
+				//   unmount FatFS
+
+				usb_state = USB_STATE_UNMOUNTED;
+
+				// Show main screen
+				refresh = true;
+
+				power_ref_put();
+				break;
+			case MSG_TYPE_POWER_OFF:
+				if (power_ref != 0) {
+					break;
+				}
+
+				// TODO: Disable USB?
+
+				badger_text("sleeping", 10, 72, 0.4f, 0.0f, 1);
+				badger_partial_update(0, 64, 296, 16, true);
+
+				if (lfs_state == LFS_STATE_MOUNTED) {
+					lfs_term(&lfs);
+					lfs_state = LFS_STATE_UNMOUNTED;
+				}
+
+				gpio_put(BADGER_PIN_ENABLE_3V3, 0);
+
+				// If we're on VBUS, then actually we keep running
 				break;
 			}
-
-			badger_text("USB timeout", 10, 24, 0.4f, 0.0f, 1);
-			badger_partial_update(0, 16, 296, 16, true);
-			power_ref--;
-
-			break;
-		case MSG_TYPE_USB_CONNECTED:
-			badger_text("USB connected", 10, 24, 0.4f, 0.0f, 1);
-			badger_partial_update(0, 16, 296, 16, true);
-			usb_connected = true;
-			break;
-		case MSG_TYPE_MSC_UNMOUNTED:
-			badger_text("MSC unmounted", 10, 24, 0.4f, 0.0f, 1);
-			badger_partial_update(0, 16, 296, 16, true);
-			break;
-		case MSG_TYPE_CDC_CONNECTED:
-			printf("Hello CDC\n");
-			sleep_ms(100);
-			/*
-			{
-				struct usb_msc_disk disk;
-				init_filesystem(&disk);
-			}
-			*/
-			break;
-		case MSG_TYPE_USB_DISCONNECTED:
-			badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
-			badger_partial_update(0, 24, 296, 16, true);
-			usb_connected = false;
-
-			power_ref--;
-			break;
 		}
 
-		if (power_ref <= 0) {
-			badger_text("sleeping", 10, 72, 0.4f, 0.0f, 1);
-			badger_partial_update(0, 64, 296, 16, true);
+		if (usb_state == USB_STATE_MOUNTED) {
+			// Not a lot to do.
+			if (buttons_pressed) {
+				// Trigger disconnect
+			}
+		} else if (usb_state == USB_STATE_UNMOUNTED) {
+			if (buttons_pressed || refresh) {
+				power_ref_get();
 
-			gpio_put(BADGER_PIN_ENABLE_3V3, 0);
+				// Make sure we've got lfs mounted to be able to read screens
+				if (lfs_state == LFS_STATE_UNMOUNTED) {
+					res = lfs_init(&lfs, multicore);
+					if (res) {
+						lfs_state = LFS_STATE_ERROR;
+					} else {
+						lfs_state = LFS_STATE_MOUNTED;
+					}
+				}
 
-			while (1) {
-				__wfi();
+				badger_pen(15);
+				badger_clear();
+				badger_pen(0);
+				badger_update_speed(1);
+				badger_text("This is the main screen", 10, 20, 0.6f, 0.0f, 1);
+				badger_update(true);
+
+				refresh = false;
+				power_ref_put();
 			}
 		}
 	}
