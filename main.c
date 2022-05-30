@@ -188,6 +188,46 @@ static int copy_file_fat_to_flash(lfs_t *lfs, lfs_file_t *dst, FIL *src, uint32_
 	return 0;
 }
 
+static int compare_files(lfs_t *lfs, lfs_file_t *lfp, FIL *ffp, uint32_t size)
+{
+	char abuf[128];
+	char bbuf[128];
+	int res, aread, bread;
+
+	while (size) {
+		res = lfs_file_read(lfs, lfp, abuf, sizeof(abuf));
+		printf("file_read: %d\n", res);
+		if (res < 0) {
+			return res;
+		}
+		aread = res;
+
+		// Short read
+		if (aread == 0) {
+			return -1;
+		}
+
+		res = f_read(ffp, bbuf, sizeof(bbuf), &bread);
+		if (res) {
+			return -res;
+		}
+
+		if (aread != bread) {
+			// Can't handle this currently, just assume they're different
+			// (it could just be that one FS decides to chunk reads differently)
+			return 1;
+		}
+
+		if (memcmp(abuf, bbuf, aread)) {
+			return 1;
+		}
+
+		size -= aread;
+	}
+
+	return 0;
+}
+
 static int copy_flash_to_fat(lfs_t *lfs)
 {
 	lfs_dir_t dir;
@@ -289,6 +329,37 @@ static int copy_fat_to_flash(lfs_t *lfs)
 		}
 
 		lfs_file_t lfp;
+
+		// Check if the files are the same
+		res = lfs_file_open(lfs, &lfp, dirent.fname, LFS_O_RDONLY);
+		printf("file_open read: %s, %d\n", dirent.fname, res);
+		if (res == 0) {
+			res = compare_files(lfs, &lfp, &fp, dirent.fsize);
+
+			// Always close the read-only flash version
+			lfs_file_close(lfs, &lfp);
+
+			if (res < 0) {
+				// Error
+				printf("compare_files: %d\n", res);
+				f_close(&fp);
+				break;
+			} else if (res == 0) {
+				// The same
+				printf("files are the same\n");
+				f_close(&fp);
+				continue;
+			} else {
+				// Different
+				res = f_rewind(&fp);
+				if (res) {
+					printf("f_rewind: %d\n", res);
+					f_close(&fp);
+					break;
+				}
+			}
+		}
+
 		res = lfs_file_open(lfs, &lfp, dirent.fname, LFS_O_CREAT | LFS_O_TRUNC | LFS_O_RDWR);
 		printf("file_open: %s, %d\n", dirent.fname, res);
 		if (res < 0) {
@@ -639,6 +710,8 @@ int main() {
 				badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 24, 296, 16, true);
 
+				usb_state = USB_STATE_UNMOUNTED;
+
 				if (lfs_state == LFS_STATE_UNMOUNTED) {
 					res = lfs_init(&lfs, multicore);
 					if (res) {
@@ -662,8 +735,6 @@ int main() {
 						badger_partial_update(0, 40, 296, 16, true);
 					}
 				}
-
-				usb_state = USB_STATE_UNMOUNTED;
 
 				// Show main screen
 				refresh = true;
@@ -690,6 +761,9 @@ int main() {
 				// If we're on VBUS, then actually we keep running
 				break;
 			case MSG_TYPE_CDC_CONNECTED:
+				sleep_ms(100);
+				printf("Hello CDC\n");
+
 				break;
 			}
 		}
