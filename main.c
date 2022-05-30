@@ -138,11 +138,47 @@ static int copy_file_flash_to_fat(lfs_t *lfs, lfs_file_t *lfp, FIL *ffp, uint32_
 		}
 		nread = res;
 
+		// Short read
+		if (nread == 0) {
+			res = -1;
+			break;
+		}
+
 		res = f_write(ffp, buf, nread, &nwrote);
 		printf("f_write: %d\n", res);
 		if (res < 0) {
 			return res;
 		} else if (nwrote != nread) {
+			return -1;
+		}
+
+		size -= nread;
+	}
+
+	return 0;
+}
+
+static int copy_file_fat_to_flash(lfs_t *lfs, lfs_file_t *dst, FIL *src, uint32_t size)
+{
+	char buf[128];
+	int res, nread;
+
+	while (size) {
+		res = f_read(src, buf, sizeof(buf), &nread);
+		if (res) {
+			return res;
+		}
+
+		// Short read
+		if (nread == 0) {
+			res = -1;
+			break;
+		}
+
+		res = lfs_file_write(lfs, dst, buf, nread);
+		if (res < 0) {
+			return res;
+		} else if (res != nread) {
 			return -1;
 		}
 
@@ -183,18 +219,22 @@ static int copy_flash_to_fat(lfs_t *lfs)
 		res = f_open(&fp, dirent.name, FA_WRITE | FA_CREATE_ALWAYS);
 		printf("f_open: %d\n", res);
 		if (res) {
+			lfs_file_close(lfs, &lfp);
 			break;
 		}
 
 		res = copy_file_flash_to_fat(lfs, &lfp, &fp, dirent.size);
 		printf("copy_file: %d\n", res);
 		if (res) {
+			lfs_file_close(lfs, &lfp);
+			f_close(&fp);
 			break;
 		}
 
 		res = lfs_file_close(lfs, &lfp);
 		printf("file_close: %d\n", res);
 		if (res < 0) {
+			f_close(&fp);
 			break;
 		}
 
@@ -211,6 +251,74 @@ static int copy_flash_to_fat(lfs_t *lfs)
 	if (dir_res != 0) {
 		return -1;
 	}
+
+	printf("res: %d\n", res);
+	if (res) {
+		return -1;
+	}
+
+	return 0;
+}
+
+static int copy_fat_to_flash(lfs_t *lfs)
+{
+	DIR dir = { 0 };
+	FILINFO dirent = { 0 };
+	FIL fp = { 0 };
+	int res;
+
+	res = f_opendir(&dir, "");
+	if (res != 0) {
+		return res;
+	}
+
+	do {
+		res = f_readdir(&dir, &dirent);
+		if (res) {
+			break;
+		} else if (strlen(dirent.fname) == 0) {
+			break;
+		} else if (dirent.fattrib & AM_DIR) {
+			continue;
+		}
+
+		res = f_open(&fp, dirent.fname, FA_READ | FA_OPEN_EXISTING);
+		printf("f_open: '%s' s%d %d\n", dirent.fname, dirent.fsize, res);
+		if (res) {
+			break;
+		}
+
+		lfs_file_t lfp;
+		res = lfs_file_open(lfs, &lfp, dirent.fname, LFS_O_CREAT | LFS_O_TRUNC | LFS_O_RDWR);
+		printf("file_open: %s, %d\n", dirent.fname, res);
+		if (res < 0) {
+			f_close(&fp);
+			break;
+		}
+
+		res = copy_file_fat_to_flash(lfs, &lfp, &fp, dirent.fsize);
+		printf("copy_file: %d\n", res);
+		if (res) {
+			lfs_file_close(lfs, &lfp);
+			f_close(&fp);
+			break;
+		}
+
+		res = lfs_file_close(lfs, &lfp);
+		printf("file_close: %d\n", res);
+		if (res < 0) {
+			f_close(&fp);
+			break;
+		}
+
+		res = f_close(&fp);
+		printf("f_close: %d\n", res);
+		if (res) {
+			break;
+		}
+	} while (1);
+
+	f_closedir(&dir);
 
 	printf("res: %d\n", res);
 	if (res) {
@@ -266,6 +374,35 @@ static void lfs_term(lfs_t *lfs)
 {
 	lfs_unmount(lfs);
 	critical_section_deinit(&lfs_flash_cfg.lock);
+}
+
+static int do_flash_update(lfs_t *lfs)
+{
+	FATFS fat = { 0 };
+
+	int res = f_mount(&fat, "", 1);
+	if (res) {
+		printf("failed to mount fat: %d", res);
+		return res;
+	}
+
+	res = copy_fat_to_flash(lfs);
+	if (res) {
+		printf("failed to copy fat to flash: %d", res);
+		goto err_unmount;
+	}
+
+	res = f_unmount("");
+	if (res) {
+		printf("failed to unmount fat: %d", res);
+		return res;
+	}
+
+	return 0;
+
+err_unmount:
+	f_unmount("");
+	return res;
 }
 
 queue_t msg_queue;
@@ -502,12 +639,29 @@ int main() {
 				badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 24, 296, 16, true);
 
-				// TODO: Do flash update
-				// To be totally safe, should also take away the MSC disk here
-				//   mount FatFS
-				//   mount LFS
-				//   Update FLS from FatFS
-				//   unmount FatFS
+				if (lfs_state == LFS_STATE_UNMOUNTED) {
+					res = lfs_init(&lfs, multicore);
+					if (res) {
+						lfs_state = LFS_STATE_ERROR;
+					} else {
+						lfs_state = LFS_STATE_MOUNTED;
+
+					}
+				}
+
+				if (lfs_state == LFS_STATE_MOUNTED) {
+					// TODO: To be totally safe, should also take away the MSC disk here
+					// in case of reconnect before the update is finished
+					res = do_flash_update(&lfs);
+					if (res) {
+						printf("failed to update flash");
+						badger_text("failed to update flash", 10, 48, 0.4f, 0.0f, 1);
+						badger_partial_update(0, 40, 296, 16, true);
+					} else {
+						badger_text("flash updated", 10, 48, 0.4f, 0.0f, 1);
+						badger_partial_update(0, 40, 296, 16, true);
+					}
+				}
 
 				usb_state = USB_STATE_UNMOUNTED;
 
@@ -534,6 +688,8 @@ int main() {
 				gpio_put(BADGER_PIN_ENABLE_3V3, 0);
 
 				// If we're on VBUS, then actually we keep running
+				break;
+			case MSG_TYPE_CDC_CONNECTED:
 				break;
 			}
 		}
