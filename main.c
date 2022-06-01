@@ -573,6 +573,8 @@ int main() {
 				break;
 			case MSG_TYPE_USB_CONNECTED:
 				// Show USB screen
+				badger_pen(0);
+				badger_thickness(1);
 				badger_text("USB connected", 10, 24, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 16, 296, 16, true);
 
@@ -580,6 +582,8 @@ int main() {
 				power_ref_get();
 				break;
 			case MSG_TYPE_USB_DISCONNECTED:
+				badger_pen(0);
+				badger_thickness(1);
 				badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 24, 296, 16, true);
 
@@ -629,36 +633,16 @@ int main() {
 				sleep_ms(100);
 				printf("Hello CDC\n");
 
-				{
-					/*
-					struct screen_page page = {
-						.n_items = 2,
-						.items = (struct screen_page_item[]){
-							{
-								.type = PAGE_ITEM_TYPE_TEXT,
-								.text = {
-									.size = 1.0,
-									.color = 0,
-									.thickness = 4,
-									.text = "Brian S",
-								},
-							},
-							{
-								.type = PAGE_ITEM_TYPE_TEXT,
-								.text = {
-									.size = 0.8,
-									.color = 3,
-									.thickness = 2,
-									.text = "@usedbytes",
-								},
-							},
-						},
-					};
+				res = lfs_ctx_mount(&lfs_ctx, multicore);
+				printf("mount: %d\n", res);
+				if (!res) {
+					struct screen_page *page = parse_file(&lfs_ctx.lfs, "barcode.txt");
+					lfs_ctx_unmount(&lfs_ctx);
 
-					page_item_calculate_size(&page.items[0]);
-					page_item_calculate_size(&page.items[1]);
-					*/
-
+					if (page) {
+						screen_page_display(page);
+						screen_page_free(page);
+					}
 				}
 
 				break;
