@@ -30,6 +30,8 @@ add_executable(${NAME}
 
     ${CMAKE_CURRENT_LIST_DIR}/lfs_pico_flash.c
 
+    ${CMAKE_CURRENT_LIST_DIR}/screen_page.c
+
     ${CMAKE_CURRENT_LIST_DIR}/error_disk.c
     ${CMAKE_CURRENT_LIST_DIR}/fat_ramdisk.c
     ${CMAKE_CURRENT_LIST_DIR}/fatfs/ff.c

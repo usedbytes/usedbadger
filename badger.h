@@ -6,6 +6,12 @@
 #endif
 
 #include <stdint.h>
+#include <stdbool.h>
+
+#define BADGER_WIDTH 296
+#define BADGER_HEIGHT 128
+// TODO: Is this right?
+#define HERSHEY_HEIGHT 36
 
 enum badger_pin {
 	BADGER_PIN_A           = 12,

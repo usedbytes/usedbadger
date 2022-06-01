@@ -11,6 +11,7 @@
 
 #include "badger.h"
 #include "lfs_pico_flash.h"
+#include "screen_page.h"
 #include "usb.h"
 
 #define README_CONTENTS "This is the default file"
@@ -400,6 +401,37 @@ int main() {
 			case MSG_TYPE_CDC_CONNECTED:
 				sleep_ms(100);
 				printf("Hello CDC\n");
+
+				{
+					struct screen_page page = {
+						.n_items = 2,
+						.items = (struct screen_page_item[]){
+							{
+								.type = PAGE_ITEM_TYPE_TEXT,
+								.text = {
+									.size = 1.0,
+									.color = 0,
+									.thickness = 4,
+									.text = "Brian S",
+								},
+							},
+							{
+								.type = PAGE_ITEM_TYPE_TEXT,
+								.text = {
+									.size = 0.8,
+									.color = 3,
+									.thickness = 2,
+									.text = "@usedbytes",
+								},
+							},
+						},
+					};
+
+					page_item_calculate_size(&page.items[0]);
+					page_item_calculate_size(&page.items[1]);
+
+					screen_page_display(&page);
+				}
 
 				break;
 			}
