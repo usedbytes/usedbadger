@@ -616,15 +616,21 @@ int main() {
 				break;
 			case MSG_TYPE_USB_CONNECTED:
 				// Show USB screen
+				badger_update_speed(2);
+				badger_pen(15);
+				badger_rectangle(0, 16, BADGER_WIDTH, 16);
 				badger_pen(0);
 				badger_thickness(1);
-				badger_text("USB connected", 10, 24, 0.4f, 0.0f, 1);
+				badger_text("USB connected. Eject and press A to update", 10, 24, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 16, 296, 16, true);
 
 				usb_state = USB_STATE_MOUNTED;
 				power_ref_get();
 				break;
 			case MSG_TYPE_USB_DISCONNECTED:
+				badger_update_speed(2);
+				badger_pen(15);
+				badger_rectangle(0, 24, BADGER_WIDTH, 16);
 				badger_pen(0);
 				badger_thickness(1);
 				badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
@@ -636,6 +642,12 @@ int main() {
 				if (!res) {
 					// TODO: To be totally safe, should also take away the MSC disk here
 					// in case of reconnect before the update is finished
+					badger_update_speed(2);
+					badger_pen(15);
+					badger_rectangle(0, 40, BADGER_WIDTH, 16);
+					badger_pen(0);
+					badger_thickness(1);
+
 					res = do_flash_update(&lfs_ctx.lfs);
 					if (res) {
 						printf("failed to update flash");
@@ -738,6 +750,51 @@ int main() {
 						}
 					}
 
+					if ((released & (1 << BADGER_PIN_A)) && usb_state == USB_STATE_MOUNTED) {
+						tud_disconnect();
+
+						// HAX! This is just a copy of the full disconnect handler
+						badger_update_speed(2);
+						badger_pen(15);
+						badger_rectangle(0, 24, BADGER_WIDTH, 16);
+						badger_pen(0);
+						badger_thickness(1);
+						badger_text("USB disconnected", 10, 32, 0.4f, 0.0f, 1);
+						badger_partial_update(0, 24, 296, 16, true);
+
+						usb_state = USB_STATE_UNMOUNTED;
+
+						res = lfs_ctx_mount(&lfs_ctx, multicore);
+						if (!res) {
+							// TODO: To be totally safe, should also take away the MSC disk here
+							// in case of reconnect before the update is finished
+							badger_update_speed(2);
+							badger_pen(15);
+							badger_rectangle(0, 40, BADGER_WIDTH, 16);
+							badger_pen(0);
+							badger_thickness(1);
+
+							res = do_flash_update(&lfs_ctx.lfs);
+							if (res) {
+								printf("failed to update flash");
+								badger_text("failed to update flash", 10, 48, 0.4f, 0.0f, 1);
+								badger_partial_update(0, 40, 296, 16, true);
+							} else {
+								badger_text("flash updated", 10, 48, 0.4f, 0.0f, 1);
+								badger_partial_update(0, 40, 296, 16, true);
+							}
+
+							lfs_ctx_unmount(&lfs_ctx);
+						}
+
+						// Drop the USB connection reference.
+						// tud_disconnect() doesn't throw a disconnection event
+						power_ref_put();
+
+						// Connect again
+						tud_connect();
+					}
+
 					printf("pressed: 0x%08x, released: 0x%08x\n", pressed, released);
 					power_ref_put();
 				}
@@ -745,6 +802,7 @@ int main() {
 			}
 		}
 
+		// FIXME: This is still needed to do the initial draw on battery
 		if (usb_state == USB_STATE_MOUNTED) {
 			// Not a lot to do.
 			if (buttons_pressed) {
