@@ -13,84 +13,13 @@
 #include "fatfs/ff.h"
 #include "error_disk.h"
 #include "fat_ramdisk.h"
+#include "lfs_pico_flash.h"
 #include "usb.h"
-
-#include "littlefs/lfs.h"
-#include "littlefs/bd/lfs_rambd.h"
 
 #define FATFS_SECTOR_SIZE 512
 #define FATFS_NUM_SECTORS 128
 
 #define README_CONTENTS "This is the default file"
-
-struct lfs_flash_cfg {
-	bool multicore;
-	critical_section_t lock;
-	uint32_t base;
-};
-
-int lfs_flash_read(const struct lfs_config *cfg, lfs_block_t block,
-        lfs_off_t off, void *buffer, lfs_size_t size)
-{
-	struct lfs_flash_cfg *ctx = cfg->context;
-	uint32_t flash_offs = ctx->base + (block * cfg->block_size) + off;
-
-	uint8_t *src = (uint8_t *)(XIP_BASE + flash_offs);
-
-	memcpy(buffer, src, size);
-
-	return 0;
-}
-
-int lfs_flash_prog(const struct lfs_config *cfg, lfs_block_t block,
-        lfs_off_t off, const void *buffer, lfs_size_t size)
-{
-	struct lfs_flash_cfg *ctx = cfg->context;
-
-	if (ctx->multicore) {
-		multicore_lockout_start_blocking();
-	}
-
-	critical_section_enter_blocking(&ctx->lock);
-
-	uint32_t flash_offs = ctx->base + (block * cfg->block_size) + off;
-	flash_range_program(flash_offs, buffer, size);
-
-	critical_section_exit(&ctx->lock);
-
-	if (ctx->multicore) {
-		multicore_lockout_end_blocking();
-	}
-
-	return 0;
-}
-
-int lfs_flash_erase(const struct lfs_config *cfg, lfs_block_t block)
-{
-	struct lfs_flash_cfg *ctx = cfg->context;
-
-	if (ctx->multicore) {
-		multicore_lockout_start_blocking();
-	}
-
-	critical_section_enter_blocking(&ctx->lock);
-
-	uint32_t flash_offs = ctx->base + (block * cfg->block_size);
-	flash_range_erase(flash_offs, cfg->block_size);
-
-	critical_section_exit(&ctx->lock);
-
-	if (ctx->multicore) {
-		multicore_lockout_end_blocking();
-	}
-
-	return 0;
-}
-
-int lfs_flash_sync(const struct lfs_config *cfg)
-{
-	return 0;
-}
 
 // Don't initialise because this is only used when USB connected
 static uint8_t __attribute__ ((section ("noinit"))) fatfs_ramdisk_data[FATFS_SECTOR_SIZE * FATFS_NUM_SECTORS];
