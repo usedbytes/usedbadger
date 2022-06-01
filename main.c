@@ -447,8 +447,31 @@ struct screen_page *parse_file(lfs_t *lfs, const char *path)
 	return page;
 }
 
-
 int main() {
+	struct screen_page empty_page = {
+		.n_items = 2,
+		.items = (struct screen_page_item[]){
+			{
+				.type = PAGE_ITEM_TYPE_TEXT,
+				.text = {
+					.size = 1.0,
+					.color = 0,
+					.thickness = 4,
+					.text = "Error!",
+				},
+			},
+			{
+				.type = PAGE_ITEM_TYPE_TEXT,
+				.text = {
+					.size = 0.8,
+					.color = 3,
+					.thickness = 2,
+					.text = "No main.txt content?",
+				},
+			},
+		},
+	};
+
 	static struct lfs_ctx lfs_ctx = {
 		.cfg = {
 			.context = &lfs_ctx.priv,
@@ -516,7 +539,9 @@ int main() {
 	badger_clear();
 	badger_pen(0);
 	badger_update_speed(1);
+	/*
 	badger_update(true);
+	*/
 
 	// Boot-up done
 	power_ref_put();
@@ -589,8 +614,10 @@ int main() {
 
 				// TODO: Disable USB?
 
-				badger_text("sleeping", 10, 72, 0.4f, 0.0f, 1);
-				badger_partial_update(0, 64, 296, 16, true);
+				badger_pen(0);
+				badger_thickness(1);
+				badger_text("z", 2, 4, 0.4f, 0.0f, 1);
+				badger_partial_update(0, 0, 16, 16, true);
 
 				lfs_ctx_unmount(&lfs_ctx);
 
@@ -603,17 +630,6 @@ int main() {
 				printf("Hello CDC\n");
 
 				{
-					res = lfs_ctx_mount(&lfs_ctx, multicore);
-					printf("mount: %d\n", res);
-					if (!res) {
-						struct screen_page *page = parse_file(&lfs_ctx.lfs, "main.txt");
-						lfs_ctx_unmount(&lfs_ctx);
-
-						if (page) {
-							screen_page_display(page);
-							screen_page_free(page);
-						}
-					}
 					/*
 					struct screen_page page = {
 						.n_items = 2,
@@ -658,18 +674,25 @@ int main() {
 			if (buttons_pressed || refresh) {
 				power_ref_get();
 
-				// Make sure we've got lfs mounted to be able to read screens
-				lfs_ctx_mount(&lfs_ctx, multicore);
+				res = lfs_ctx_mount(&lfs_ctx, multicore);
+				printf("mount: %d\n", res);
+				if (!res) {
+					struct screen_page *page = parse_file(&lfs_ctx.lfs, "main.txt");
+					lfs_ctx_unmount(&lfs_ctx);
 
-				badger_pen(15);
-				badger_clear();
-				badger_pen(0);
-				badger_update_speed(1);
-				badger_text("This is the main screen", 10, 20, 0.6f, 0.0f, 1);
-				badger_update(true);
+					if (page) {
+						screen_page_display(page);
+						screen_page_free(page);
+					} else {
+						screen_page_calculate_sizes(&empty_page);
+						screen_page_display(&empty_page);
+					}
+				} else {
+					screen_page_calculate_sizes(&empty_page);
+					screen_page_display(&empty_page);
+				}
 
 				refresh = false;
-				lfs_ctx_unmount(&lfs_ctx);
 				power_ref_put();
 			}
 		}

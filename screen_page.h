@@ -40,6 +40,7 @@ struct screen_page {
 	struct screen_page_item *items;
 };
 
+void screen_page_calculate_sizes(struct screen_page *page);
 void screen_page_display(struct screen_page *page);
 void page_item_calculate_size(struct screen_page_item *item);
 

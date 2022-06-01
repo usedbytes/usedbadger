@@ -85,6 +85,13 @@ void page_item_calculate_size(struct screen_page_item *item)
 	return;
 }
 
+void screen_page_calculate_sizes(struct screen_page *page)
+{
+	for (int i = 0; i < page->n_items; i++) {
+		page_item_calculate_size(&page->items[i]);
+	}
+}
+
 // Use https://github.com/randrew/layout
 void screen_page_display(struct screen_page *page)
 {
