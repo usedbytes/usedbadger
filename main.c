@@ -29,11 +29,6 @@ struct lfs_flash_cfg {
 	uint32_t base;
 };
 
-struct lfs_flash_cfg lfs_flash_cfg = {
-	// FIXME: The linker doesn't know anything about this
-	.base = PICO_FLASH_SIZE_BYTES - (4096 * 16),
-};
-
 int lfs_flash_read(const struct lfs_config *cfg, lfs_block_t block,
         lfs_off_t off, void *buffer, lfs_size_t size)
 {
@@ -96,25 +91,6 @@ int lfs_flash_sync(const struct lfs_config *cfg)
 {
 	return 0;
 }
-
-const struct lfs_config lfs_cfg = {
-	.context = &lfs_flash_cfg,
-	// block device operations
-	.read  = lfs_flash_read,
-	.prog  = lfs_flash_prog,
-	.erase = lfs_flash_erase,
-	.sync  = lfs_flash_sync,
-
-	// block device configuration
-	.read_size = 1,
-	.prog_size = 256,
-	.block_size = 4096,
-	.block_count = 16,
-	.cache_size = 256,
-	.lookahead_size = 4,
-	.block_cycles = 500,
-};
-
 
 // Don't initialise because this is only used when USB connected
 static uint8_t __attribute__ ((section ("noinit"))) fatfs_ramdisk_data[FATFS_SECTOR_SIZE * FATFS_NUM_SECTORS];
@@ -399,54 +375,6 @@ static int copy_fat_to_flash(lfs_t *lfs)
 	return 0;
 }
 
-static int lfs_init(lfs_t *lfs, bool multicore)
-{
-	critical_section_init(&lfs_flash_cfg.lock);
-	lfs_flash_cfg.multicore = multicore;
-
-	int res = lfs_mount(lfs, &lfs_cfg);
-	if (res) {
-		// On first try, format and write an initial file
-		lfs_file_t lfp = { 0 };
-
-		res = lfs_format(lfs, &lfs_cfg);
-		if (res) {
-			goto err_out;
-		}
-
-		res = lfs_mount(lfs, &lfs_cfg);
-		if (res) {
-			goto err_out;
-		}
-
-		res = lfs_file_open(lfs, &lfp, "readme.txt", LFS_O_RDWR | LFS_O_CREAT);
-		if (res) {
-			goto err_unmount;
-		}
-
-		lfs_file_write(lfs, &lfp, README_CONTENTS, strlen(README_CONTENTS));
-
-		res = lfs_file_close(lfs, &lfp);
-		if (res) {
-			goto err_unmount;
-		}
-	}
-
-	return 0;
-
-err_unmount:
-	lfs_unmount(lfs);
-err_out:
-	critical_section_deinit(&lfs_flash_cfg.lock);
-	return res;
-}
-
-static void lfs_term(lfs_t *lfs)
-{
-	lfs_unmount(lfs);
-	critical_section_deinit(&lfs_flash_cfg.lock);
-}
-
 static int do_flash_update(lfs_t *lfs)
 {
 	FATFS fat = { 0 };
@@ -614,20 +542,159 @@ static void power_ref_put()
 	}
 }
 
+enum lfs_state {
+	LFS_STATE_ERROR = -1,
+	LFS_STATE_NONE = 0,
+	LFS_STATE_MOUNTED,
+	LFS_STATE_UNMOUNTED,
+};
+
+struct lfs_ctx {
+	struct lfs_config cfg;
+	struct lfs_flash_cfg priv;
+	lfs_t lfs;
+	enum lfs_state state;
+};
+
+// Leaves the filesystem mounted on success
+static int lfs_format_init(struct lfs_ctx *ctx)
+{
+	lfs_file_t lfp = { 0 };
+
+	int res = lfs_format(&ctx->lfs, &ctx->cfg);
+	if (res) {
+		return res;
+	}
+
+	res = lfs_mount(&ctx->lfs, &ctx->cfg);
+	if (res) {
+		return res;
+	}
+
+	res = lfs_file_open(&ctx->lfs, &lfp, "readme.txt", LFS_O_RDWR | LFS_O_CREAT);
+	if (res) {
+		goto err_unmount;
+	}
+
+	// TODO: Might fail?
+	lfs_file_write(&ctx->lfs, &lfp, README_CONTENTS, strlen(README_CONTENTS));
+
+	res = lfs_file_close(&ctx->lfs, &lfp);
+	if (res) {
+		goto err_unmount;
+	}
+
+	return 0;
+
+err_unmount:
+	lfs_unmount(&ctx->lfs);
+	return res;
+}
+
+int lfs_ctx_mount(struct lfs_ctx *ctx, bool multicore)
+{
+	int res;
+
+	if (ctx->state == LFS_STATE_ERROR) {
+		return -1;
+	}
+
+	if (ctx->state == LFS_STATE_NONE) {
+		critical_section_init(&ctx->priv.lock);
+	}
+
+	if (ctx->state == LFS_STATE_MOUNTED) {
+	       if (multicore == ctx->priv.multicore) {
+			// Nothing to do
+			return 0;
+		} else {
+			res = lfs_unmount(&ctx->lfs);
+			if (res) {
+				ctx->state = LFS_STATE_ERROR;
+				return -1;
+			}
+		}
+	}
+
+	ctx->priv.multicore = multicore;
+
+	res = lfs_mount(&ctx->lfs, &ctx->cfg);
+	if (res) {
+		if (ctx->state == LFS_STATE_NONE) {
+			res = lfs_format_init(ctx);
+			if (!res) {
+				// Success
+				ctx->state = LFS_STATE_MOUNTED;
+				return 0;
+			}
+		}
+
+		ctx->state = LFS_STATE_ERROR;
+		return res;
+	}
+
+	ctx->state = LFS_STATE_MOUNTED;
+	return 0;
+}
+
+int lfs_ctx_unmount(struct lfs_ctx *ctx)
+{
+	int res;
+
+	if (ctx->state == LFS_STATE_ERROR) {
+		return -1;
+	}
+
+	if (ctx->state == LFS_STATE_UNMOUNTED) {
+		return 0;
+	}
+
+	if (ctx->state != LFS_STATE_MOUNTED) {
+		return -1;
+	}
+
+	res = lfs_unmount(&ctx->lfs);
+	if (res) {
+		ctx->state = LFS_STATE_ERROR;
+		return res;
+	}
+
+	ctx->state = LFS_STATE_UNMOUNTED;
+	return 0;
+}
+
 int main() {
+	static struct lfs_ctx lfs_ctx = {
+		.cfg = {
+			.context = &lfs_ctx.priv,
+			// block device operations
+			.read  = lfs_flash_read,
+			.prog  = lfs_flash_prog,
+			.erase = lfs_flash_erase,
+			.sync  = lfs_flash_sync,
+
+			// block device configuration
+			.read_size = 1,
+			.prog_size = 256,
+			.block_size = 4096,
+			.block_count = 16,
+			.cache_size = 256,
+			.lookahead_size = 4,
+			.block_cycles = 500,
+		},
+		.priv = {
+			// FIXME: The linker doesn't know anything about this
+			.base = PICO_FLASH_SIZE_BYTES - (4096 * 16),
+		},
+		.state = LFS_STATE_NONE,
+	};
+
 	enum {
 		USB_STATE_NONE,
 		USB_STATE_WAITING,
 		USB_STATE_MOUNTED,
 		USB_STATE_UNMOUNTED,
 	} usb_state = USB_STATE_NONE;
-	enum {
-		LFS_STATE_NONE,
-		LFS_STATE_ERROR,
-		LFS_STATE_MOUNTED,
-		LFS_STATE_UNMOUNTED,
-	} lfs_state = LFS_STATE_NONE;
-	lfs_t lfs;
 	bool multicore = false;
 	int res;
 
@@ -640,22 +707,18 @@ int main() {
 	queue_init(&msg_queue, sizeof(struct msg), 8);
 
 	// Unconditionally mount LFS to start with
-	res = lfs_init(&lfs, false);
+	res = lfs_ctx_mount(&lfs_ctx, false);
 	if (res) {
-		lfs_state = LFS_STATE_ERROR;
-		// How to handle error?
-	} else {
-		lfs_state = LFS_STATE_MOUNTED;
+		// What do?
 	}
 
 	if (gpio_get(BADGER_PIN_VBUS_DETECT)) {
 		// Hold power until USB has had a chance to connect
 		power_ref_get();
-		prepare_usb_filesystem(&lfs, &usb_opt.msc.disk);
+		prepare_usb_filesystem(&lfs_ctx.lfs, &usb_opt.msc.disk);
 
 		// Flash access not safe any more, need to remount as multicore
-		lfs_term(&lfs);
-		lfs_state = LFS_STATE_UNMOUNTED;
+		lfs_ctx_unmount(&lfs_ctx);
 		usb_state = USB_STATE_WAITING;
 
 		launch_usb();
@@ -712,20 +775,11 @@ int main() {
 
 				usb_state = USB_STATE_UNMOUNTED;
 
-				if (lfs_state == LFS_STATE_UNMOUNTED) {
-					res = lfs_init(&lfs, multicore);
-					if (res) {
-						lfs_state = LFS_STATE_ERROR;
-					} else {
-						lfs_state = LFS_STATE_MOUNTED;
-
-					}
-				}
-
-				if (lfs_state == LFS_STATE_MOUNTED) {
+				res = lfs_ctx_mount(&lfs_ctx, multicore);
+				if (!res) {
 					// TODO: To be totally safe, should also take away the MSC disk here
 					// in case of reconnect before the update is finished
-					res = do_flash_update(&lfs);
+					res = do_flash_update(&lfs_ctx.lfs);
 					if (res) {
 						printf("failed to update flash");
 						badger_text("failed to update flash", 10, 48, 0.4f, 0.0f, 1);
@@ -734,6 +788,8 @@ int main() {
 						badger_text("flash updated", 10, 48, 0.4f, 0.0f, 1);
 						badger_partial_update(0, 40, 296, 16, true);
 					}
+
+					lfs_ctx_unmount(&lfs_ctx);
 				}
 
 				// Show main screen
@@ -751,10 +807,7 @@ int main() {
 				badger_text("sleeping", 10, 72, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 64, 296, 16, true);
 
-				if (lfs_state == LFS_STATE_MOUNTED) {
-					lfs_term(&lfs);
-					lfs_state = LFS_STATE_UNMOUNTED;
-				}
+				lfs_ctx_unmount(&lfs_ctx);
 
 				gpio_put(BADGER_PIN_ENABLE_3V3, 0);
 
@@ -778,14 +831,7 @@ int main() {
 				power_ref_get();
 
 				// Make sure we've got lfs mounted to be able to read screens
-				if (lfs_state == LFS_STATE_UNMOUNTED) {
-					res = lfs_init(&lfs, multicore);
-					if (res) {
-						lfs_state = LFS_STATE_ERROR;
-					} else {
-						lfs_state = LFS_STATE_MOUNTED;
-					}
-				}
+				lfs_ctx_mount(&lfs_ctx, multicore);
 
 				badger_pen(15);
 				badger_clear();
@@ -795,6 +841,7 @@ int main() {
 				badger_update(true);
 
 				refresh = false;
+				lfs_ctx_unmount(&lfs_ctx);
 				power_ref_put();
 			}
 		}
