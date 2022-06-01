@@ -3,6 +3,7 @@
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "hardware/gpio.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "pico/util/queue.h"
@@ -31,6 +32,7 @@ enum msg_type {
 	MSG_TYPE_MSC_UNMOUNTED,
 	MSG_TYPE_CDC_CONNECTED,
 	MSG_TYPE_POWER_OFF,
+	MSG_TYPE_BTNS_CHANGED,
 };
 
 struct msg {
@@ -110,6 +112,7 @@ static int64_t power_timeout(alarm_id_t id, void *d)
 
 	return 0;
 }
+
 static void power_ref_get()
 {
 	power_ref++;
@@ -447,6 +450,27 @@ struct screen_page *parse_file(lfs_t *lfs, const char *path)
 	return page;
 }
 
+static int64_t button_changed(alarm_id_t id, void *d)
+{
+	queue_try_add(&msg_queue, &(struct msg){ .type = MSG_TYPE_BTNS_CHANGED });
+
+	return 0;
+}
+
+#define BUTTON_DEBOUNCE_US 10000
+static void gpio_irq_cb(uint gpio, uint32_t events)
+{
+	static uint32_t ts = 0;
+
+	uint32_t now = time_us_32();
+	int32_t diff = now - ts;
+	ts = now;
+
+	if (diff >= BUTTON_DEBOUNCE_US) {
+		add_alarm_in_us(BUTTON_DEBOUNCE_US, button_changed, NULL, true);
+	}
+}
+
 int main() {
 	struct screen_page empty_page = {
 		.n_items = 2,
@@ -506,11 +530,27 @@ int main() {
 	bool multicore = false;
 	int res;
 
+	uint32_t buttons = 0;
+	uint32_t pressed = 0;
+	uint32_t released = 0;
+
+	if (badger_pressed_to_wake(BADGER_PIN_DOWN)) {
+		buttons |= (1 << BADGER_PIN_DOWN);
+	}
+
 	badger_init();
 	badger_led(255);
 
 	// Hold power alive for boot-up
 	power_ref_get();
+
+	gpio_set_irq_enabled_with_callback(BADGER_PIN_A, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_irq_cb);
+	gpio_set_irq_enabled(BADGER_PIN_B, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+	gpio_set_irq_enabled(BADGER_PIN_C, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+	gpio_set_irq_enabled(BADGER_PIN_D, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+	gpio_set_irq_enabled(BADGER_PIN_UP, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+	gpio_set_irq_enabled(BADGER_PIN_DOWN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+
 
 	queue_init(&msg_queue, sizeof(struct msg), 8);
 
@@ -538,7 +578,7 @@ int main() {
 	badger_pen(15);
 	badger_clear();
 	badger_pen(0);
-	badger_update_speed(1);
+	badger_update_speed(2);
 	/*
 	badger_update(true);
 	*/
@@ -550,6 +590,9 @@ int main() {
 	bool buttons_pressed = false;
 	// TODO: Should really just do the refresh while still holding the reference
 	bool refresh = true;
+
+	int current_idx = 0;
+	char current_page[64] = "main.txt";
 
 	for ( ;; ) {
 		struct msg msg;
@@ -617,9 +660,27 @@ int main() {
 				}
 
 				// TODO: Disable USB?
+				res = lfs_ctx_mount(&lfs_ctx, multicore);
+				printf("mount: %d\n", res);
+				if (!res) {
+					struct screen_page *page = parse_file(&lfs_ctx.lfs, current_page);
+					if (!page) {
+						sprintf(current_page, "main.txt");
+						current_idx = 0;
+						page = parse_file(&lfs_ctx.lfs, current_page);
+					}
+					lfs_ctx_unmount(&lfs_ctx);
+
+					if (page) {
+						badger_update_speed(0);
+						screen_page_display(page);
+						screen_page_free(page);
+					}
+				}
 
 				badger_pen(0);
 				badger_thickness(1);
+				badger_update_speed(3);
 				badger_text("o", 2, 4, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 0, 16, 16, true);
 
@@ -645,6 +706,41 @@ int main() {
 					}
 				}
 
+				break;
+			case MSG_TYPE_BTNS_CHANGED:
+				{
+					power_ref_get();
+					badger_update_button_states();
+					uint32_t new = badger_button_states();
+					uint32_t pressed = new & ~buttons;
+					uint32_t released = buttons & ~new;
+					buttons = new;
+
+					if (released & (1 << BADGER_PIN_DOWN)) {
+						current_idx++;
+						sprintf(current_page, "page%d.txt", current_idx);
+						res = lfs_ctx_mount(&lfs_ctx, multicore);
+						printf("mount: %d\n", res);
+						if (!res) {
+							struct screen_page *page = parse_file(&lfs_ctx.lfs, current_page);
+							if (!page) {
+								sprintf(current_page, "main.txt");
+								current_idx = 0;
+								page = parse_file(&lfs_ctx.lfs, current_page);
+							}
+							lfs_ctx_unmount(&lfs_ctx);
+
+							if (page) {
+								badger_update_speed(3);
+								screen_page_display(page);
+								screen_page_free(page);
+							}
+						}
+					}
+
+					printf("pressed: 0x%08x, released: 0x%08x\n", pressed, released);
+					power_ref_put();
+				}
 				break;
 			}
 		}
