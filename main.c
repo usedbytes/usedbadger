@@ -248,6 +248,206 @@ int lfs_ctx_unmount(struct lfs_ctx *ctx)
 	return 0;
 }
 
+char *read_file(lfs_t *lfs, const char *path)
+{
+	struct lfs_info st;
+	lfs_file_t fp;
+	int res;
+	char *buf;
+
+	res = lfs_stat(lfs, path, &st);
+	if (res != 0) {
+		return NULL;
+	}
+
+	printf("stat %s: %d\n", path, st.size);
+
+	buf = malloc(st.size);
+
+	res = lfs_file_open(lfs, &fp, path, LFS_O_RDONLY);
+	if (res) {
+		free(buf);
+		return NULL;
+	}
+
+	res = lfs_file_read(lfs, &fp, buf, st.size);
+	lfs_file_close(lfs, &fp);
+	if (res != st.size) {
+		free(buf);
+		return NULL;
+	}
+
+	return buf;
+}
+
+int parse_img(lfs_t *lfs, struct screen_page_item *item, char *buf)
+{
+	char *tok, *tmp;
+
+	item->type = PAGE_ITEM_TYPE_IMAGE;
+
+	// img
+	tok = strsep(&buf, " ");
+	printf("first tok: %s\n", tok);
+	tmp = index(tok, '.');
+	if (tmp) {
+		printf("font: %s\n", tmp);
+	}
+
+	tok = strsep(&buf, " ");
+	printf("width tok: %s\n", tok);
+	if (sscanf(tok, "%d", &item->image.width) != 1) {
+		printf("failed parsing img.width\n");
+		return -1;
+	}
+
+	tok = strsep(&buf, " ");
+	printf("height tok: %s\n", tok);
+	if (sscanf(tok, "%d", &item->image.height) != 1) {
+		printf("failed parsing image.height\n");
+		return -1;
+	}
+
+	tok = strsep(&buf, " ");
+	printf("path tok: %s\n", tok);
+	item->image.data = (uint8_t *)read_file(lfs, tok);
+	if (!item->image.data) {
+		printf("failed reading image.data\n");
+		return -1;
+	}
+
+	printf("Parsed image: %d %d '%08x'\n",
+			item->image.width, item->image.height, *(uint32_t *)item->image.data);
+
+	return 0;
+}
+
+int parse_text(lfs_t *lfs, struct screen_page_item *item, char *buf)
+{
+	char *tok, *tmp;
+
+	item->type = PAGE_ITEM_TYPE_TEXT;
+
+	// text.font
+	tok = strsep(&buf, " ");
+	printf("first tok: %s\n", tok);
+	tmp = index(tok, '.');
+	if (tmp) {
+		printf("font: %s\n", tmp);
+	}
+
+	tok = strsep(&buf, " ");
+	printf("size tok: %s\n", tok);
+	if (sscanf(tok, "%f", &item->text.size) != 1) {
+		printf("failed parsing text.size\n");
+		return -1;
+	}
+
+	tok = strsep(&buf, " ");
+	printf("color tok: %s\n", tok);
+	if (sscanf(tok, "%hhd", &item->text.color) != 1) {
+		printf("failed parsing text.color\n");
+		return -1;
+	}
+
+	tok = strsep(&buf, " ");
+	printf("thickness tok: %s\n", tok);
+	if (sscanf(tok, "%hhd", &item->text.thickness) != 1) {
+		printf("failed parsing text.thickness\n");
+		return -1;
+	}
+
+	tok = strsep(&buf, "\n");
+	printf("text tok: %s\n", tok);
+	item->text.text = malloc(strlen(tok) + 1);
+	strcpy(item->text.text, tok);
+
+	printf("Parsed text: %1.3f %d %d '%s'\n",
+			item->text.size, item->text.color, item->text.thickness, item->text.text);
+
+	return 0;
+}
+
+void screen_page_free(struct screen_page *page)
+{
+	if (!page) {
+		return;
+	}
+
+	for (int i = 0; i < page->n_items; i++) {
+		struct screen_page_item *item = &page->items[i];
+		switch (item->type) {
+		case PAGE_ITEM_TYPE_IMAGE:
+			free(item->image.data);
+			break;
+		case PAGE_ITEM_TYPE_TEXT:
+			free(item->text.text);
+			break;
+		}
+	}
+
+	free(page);
+}
+
+struct screen_page *parse_file(lfs_t *lfs, const char *path)
+{
+	int res;
+	struct screen_page *page = NULL;
+
+	char *buf = read_file(lfs, path);
+	if (!buf) {
+		return NULL;
+	}
+
+	int nlines = 0;
+	char *p = buf;
+	while (*p) {
+		if (*p == '\n') {
+			nlines++;
+		}
+		p++;
+	}
+	printf("nlines: %d\n", nlines);
+
+	page = calloc(1, sizeof(*page));
+	page->items = calloc(nlines, sizeof(*page->items));
+
+	char *next = buf, *line;
+	while (next) {
+		line = strsep(&next, "\n");
+		printf("item: %d, %s\n", page->n_items, line);
+
+		if (strncmp(line, "text", strlen("text")) == 0) {
+			res = parse_text(lfs, &page->items[page->n_items], line);
+		} else if (strncmp(line, "img", strlen("img")) == 0) {
+			res = parse_img(lfs, &page->items[page->n_items], line);
+		} else {
+			printf("skip unknown type: '%s'\n", line);
+			continue;
+		}
+
+		if (res) {
+			break;
+		}
+
+		page_item_calculate_size(&page->items[page->n_items]);
+
+		page->n_items++;
+	}
+
+	free(buf);
+
+	printf("res: %d, n_items: %d\n", res, page->n_items);
+
+	if (res) {
+		screen_page_free(page);
+		page = NULL;
+	}
+
+	return page;
+}
+
+
 int main() {
 	static struct lfs_ctx lfs_ctx = {
 		.cfg = {
@@ -403,6 +603,18 @@ int main() {
 				printf("Hello CDC\n");
 
 				{
+					res = lfs_ctx_mount(&lfs_ctx, multicore);
+					printf("mount: %d\n", res);
+					if (!res) {
+						struct screen_page *page = parse_file(&lfs_ctx.lfs, "main.txt");
+						lfs_ctx_unmount(&lfs_ctx);
+
+						if (page) {
+							screen_page_display(page);
+							screen_page_free(page);
+						}
+					}
+					/*
 					struct screen_page page = {
 						.n_items = 2,
 						.items = (struct screen_page_item[]){
@@ -429,8 +641,8 @@ int main() {
 
 					page_item_calculate_size(&page.items[0]);
 					page_item_calculate_size(&page.items[1]);
+					*/
 
-					screen_page_display(&page);
 				}
 
 				break;

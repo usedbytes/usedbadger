@@ -30,7 +30,7 @@ struct screen_page_item {
 			float size;
 			uint8_t color;
 			uint8_t thickness;
-			const char *text;
+			char *text;
 		} text;
 	};
 };
