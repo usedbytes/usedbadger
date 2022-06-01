@@ -620,7 +620,7 @@ int main() {
 
 				badger_pen(0);
 				badger_thickness(1);
-				badger_text("z", 2, 4, 0.4f, 0.0f, 1);
+				badger_text("o", 2, 4, 0.4f, 0.0f, 1);
 				badger_partial_update(0, 0, 16, 16, true);
 
 				lfs_ctx_unmount(&lfs_ctx);
